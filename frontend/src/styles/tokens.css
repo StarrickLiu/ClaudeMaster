@@ -1,0 +1,65 @@
+/* 设计变量：颜色、间距、字体、圆角 */
+:root {
+  /* 颜色 */
+  --color-bg: #f5f5f7;
+  --color-surface: #ffffff;
+  --color-primary: #6366f1;
+  --color-primary-hover: #4f46e5;
+  --color-text: #1f2937;
+  --color-text-secondary: #6b7280;
+  --color-text-muted: #9ca3af;
+  --color-border: #e5e7eb;
+  --color-border-light: #f3f4f6;
+
+  --color-user-bg: #eff6ff;
+  --color-user-border: #bfdbfe;
+  --color-assistant-bg: #ffffff;
+
+  --color-diff-add-bg: #dcfce7;
+  --color-diff-add-text: #166534;
+  --color-diff-del-bg: #fee2e2;
+  --color-diff-del-text: #991b1b;
+  --color-diff-hunk: #818cf8;
+
+  --color-attention: #f59e0b;
+  --color-attention-bg: #fffbeb;
+  --color-working: #10b981;
+  --color-working-bg: #ecfdf5;
+  --color-done: #6b7280;
+  --color-done-bg: #f9fafb;
+  --color-error: #ef4444;
+
+  --color-tool-bg: #f8fafc;
+  --color-tool-border: #e2e8f0;
+  --color-thinking-bg: #f9fafb;
+  --color-thinking-text: #9ca3af;
+
+  /* 间距 */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* 字体 */
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "SF Mono", "Fira Code", "JetBrains Mono", Menlo, "Courier New", monospace;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.25rem;
+  --font-size-2xl: 1.5rem;
+
+  /* 圆角 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  /* 阴影 */
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.07), 0 2px 4px -2px rgba(0,0,0,0.05);
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.08), 0 4px 6px -4px rgba(0,0,0,0.04);
+}
