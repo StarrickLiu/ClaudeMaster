@@ -8,10 +8,14 @@ from models.message import Message
 
 class SessionSummary(BaseModel):
     """会话摘要信息，用于列表展示。"""
-    session_id: str
+    session_id: str          # JSONL 文件名（内部索引键）
+    resume_session_id: str | None = None  # JSONL 内部 sessionId（用于 claude --resume）
     project_path: str
     project_name: str
     first_message: str | None = None
+    last_assistant_text: str | None = None
+    user_turns: int = 0
+    tool_use_count: int = 0
     message_count: int = 0
     start_time: str | None = None
     end_time: str | None = None

@@ -13,6 +13,11 @@
   padding: var(--space-lg);
 }
 
+.page-full {
+  flex: 1;
+  width: 100%;
+}
+
 .card-grid {
   display: grid;
   gap: var(--space-md);
@@ -63,6 +68,17 @@
   text-align: center;
   padding: var(--space-2xl);
   color: var(--color-text-muted);
+}
+
+/* 聊天模式：隐藏移动端底部导航，释放空间给输入框 */
+@media (max-width: 768px) {
+  body.chat-active cm-nav-bar {
+    display: none !important;
+  }
+
+  body.chat-active .page {
+    padding-bottom: var(--space-md);
+  }
 }
 
 /* 移动端适配 */

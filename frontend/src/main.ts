@@ -4,15 +4,31 @@ import "./components/nav-bar.js";
 import "./pages/dashboard.js";
 import "./pages/sessions.js";
 import "./pages/viewer.js";
+import "./pages/settings.js";
+import "./pages/docs.js";
+
+// 初始化主题（尽早执行，避免浅色闪烁）
+const savedTheme = localStorage.getItem("cm_theme");
+if (savedTheme === "dark") {
+  document.documentElement.setAttribute("data-theme", "dark");
+}
 
 const app = document.getElementById("app")!;
+
+// 路由 → 导航高亮映射
+const activeMap: Record<string, string> = {
+  "cm-dashboard": "dashboard",
+  "cm-sessions": "sessions",
+  "cm-viewer": "",
+  "cm-settings": "settings",
+  "cm-docs": "docs",
+};
 
 function setPage(tagName: string, attrs: Record<string, string> = {}) {
   // 更新导航高亮
   const nav = document.querySelector("cm-nav-bar");
   if (nav) {
-    const active = tagName.replace("cm-", "").split("-")[0];
-    nav.setAttribute("active", active === "viewer" ? "" : active);
+    nav.setAttribute("active", activeMap[tagName] ?? "");
   }
 
   // 渲染页面
@@ -26,7 +42,9 @@ function setPage(tagName: string, attrs: Record<string, string> = {}) {
   if (existing) existing.remove();
 
   const container = document.createElement("div");
-  container.className = "page-container page";
+  // 文档页使用全宽布局，不受 .page 的 max-width 限制
+  const isFullWidth = tagName === "cm-docs";
+  container.className = isFullWidth ? "page-container page-full" : "page-container page";
   container.appendChild(page);
   app.appendChild(container);
 
@@ -37,6 +55,9 @@ function setPage(tagName: string, attrs: Record<string, string> = {}) {
 // 注册路由
 router.add("/dashboard", () => setPage("cm-dashboard"));
 router.add("/sessions", () => setPage("cm-sessions"));
+router.add("/settings", () => setPage("cm-settings"));
+router.add("/docs", () => setPage("cm-docs", { page: "overview" }));
+router.add("/docs/:page", (params) => setPage("cm-docs", { page: params["page"] }));
 router.add("/viewer/:project/:sessionId", (params) =>
   setPage("cm-viewer", {
     project: params["project"],

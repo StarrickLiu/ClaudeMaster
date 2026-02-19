@@ -1,4 +1,4 @@
-// 运行中进程卡片组件
+// 待命中进程卡片组件（非 broker 管理的 Claude 进程）
 import { LitElement, html, css } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { ClaudeProcess } from "../api.js";
@@ -15,11 +15,17 @@ export class ProcessCard extends LitElement {
 
     .card {
       background: var(--color-surface);
-      border: 1px solid var(--color-working);
-      border-left: 4px solid var(--color-working);
+      border: 1px solid var(--color-standby);
+      border-left: 4px solid var(--color-standby);
       border-radius: var(--radius-md);
       padding: var(--space-md);
       box-shadow: var(--shadow-sm);
+      cursor: pointer;
+      transition: box-shadow 0.15s;
+    }
+
+    .card:hover {
+      box-shadow: 0 0 0 2px var(--color-standby);
     }
 
     .header {
@@ -39,15 +45,14 @@ export class ProcessCard extends LitElement {
       align-items: center;
       gap: 4px;
       font-size: var(--font-size-xs);
-      color: var(--color-working);
+      color: var(--color-standby);
     }
 
     .dot {
       width: 8px;
       height: 8px;
       border-radius: 50%;
-      background: var(--color-working);
-      animation: pulse 2s infinite;
+      background: var(--color-standby);
     }
 
     @keyframes pulse {
@@ -67,17 +72,29 @@ export class ProcessCard extends LitElement {
     }
   `;
 
+  private _handleClick() {
+    const d = this.data;
+    const encoded = d.cwd.replace(/\//g, "-");
+    if (d.session_id) {
+      location.hash = `#/viewer/${encoded}/${d.session_id}`;
+    } else {
+      // 无 session_id 时跳转到会话历史筛选该项目
+      location.hash = `#/sessions?project=${encoded}`;
+    }
+  }
+
   render() {
     const d = this.data;
     return html`
-      <div class="card">
+      <div class="card" @click=${this._handleClick}>
         <div class="header">
           <span class="project-name">${d.project_name || "未知项目"}</span>
-          <span class="status"><span class="dot"></span>运行中</span>
+          <span class="status"><span class="dot"></span>待命中</span>
         </div>
         <div class="meta">
           <span>PID <span class="meta-item">${d.pid}</span></span>
           <span>已运行 <span class="meta-item">${formatDuration(d.uptime_seconds)}</span></span>
+          ${d.git_branch ? html`<span class="meta-item">${d.git_branch}</span>` : ""}
         </div>
       </div>
     `;

@@ -1,4 +1,16 @@
-# FastAPI 应用入口：CORS、认证中间件、路由挂载
+# FastAPI 应用入口：CORS、认证中间件、路由挂载、生命周期管理
+import logging
+import sys
+from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator
+
+# 配置日志：INFO 级别输出到 stdout，[PERM] 前缀便于 grep
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    stream=sys.stdout,
+)
+
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -6,9 +18,23 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from pathlib import Path
 
 from config import AUTH_TOKEN
-from routers import projects, sessions, processes, history, diff
+from routers import projects, sessions, processes, history, diff, chat, usage
+from ws.handler import router as ws_router
+from services.claude_broker import broker
 
-app = FastAPI(title="ClaudeMaster", version="0.1.0", description="Claude Code Web 管理平台")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
+    yield
+    await broker.shutdown()
+
+
+app = FastAPI(
+    title="ClaudeMaster",
+    version="0.2.0",
+    description="Claude Code Web 管理平台",
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,6 +60,9 @@ app.include_router(sessions.router, prefix="/api")
 app.include_router(processes.router, prefix="/api")
 app.include_router(history.router, prefix="/api")
 app.include_router(diff.router, prefix="/api")
+app.include_router(chat.router, prefix="/api")
+app.include_router(usage.router, prefix="/api")
+app.include_router(ws_router)
 
 # 生产模式下服务前端静态文件
 frontend_dist = Path(__file__).parent.parent / "frontend" / "dist"

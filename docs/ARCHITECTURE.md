@@ -286,6 +286,7 @@ ClaudeMaster/
 │   │   ├── process_manager.py     # 检测、启动、停止 Claude 进程
 │   │   ├── history_reader.py      # 解析全局 history.jsonl
 │   │   ├── project_scanner.py     # 从 ~/.claude/projects/ 发现项目
+│   │   ├── name_generator.py      # Docker 风格随机名称生成器
 │   │   └── file_watcher.py        # 监听新增/变更的 JSONL 文件
 │   ├── models/
 │   │   ├── __init__.py
@@ -377,7 +378,32 @@ POST /api/processes/start
 
 POST /api/processes/:pid/stop
      → { success: boolean }
+
+POST /api/chat/start
+     body: { project_path, resume_session_id?, model?, allowed_tools?, ... }
+     → ChatSessionInfo { session_id, claude_session_id?, name, state, launch_config, ... }
+
+GET  /api/chat/sessions
+     → [ChatSessionInfo]
+
+PATCH /api/chat/:sessionId
+     body: { name? }
+     → ChatSessionInfo
+
+POST /api/chat/:sessionId/stop
+     → { success: boolean }
 ```
+
+#### 会话 ID 说明
+
+Broker 管理的会话有两个 ID：
+
+| ID | 说明 | 用途 |
+|----|------|------|
+| `session_id`（initial_id） | 新建时为随机 UUID，恢复时为原 session_id | 前端 URL、WebSocket 连接、broker 查找 |
+| `claude_session_id` | Claude Code 进程分配的真实 ID | JSONL 文件名、历史数据加载 |
+
+`list_sessions` 和 `start_chat` 同时返回两个 ID。当两者相同时 `claude_session_id` 为 null。
 
 ### 6.2 WebSocket 协议
 

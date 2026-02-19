@@ -35,7 +35,10 @@ ClaudeMaster 是一个个人使用的 Web 端 Claude Code CLI 管理平台。
 ## 关键设计决策
 - 会话数据解析自 ~/.claude/projects/**/*.jsonl（每行一个 JSON 对象）
 - 进程检测扫描 /proc/*/cmdline 中包含 "claude-code/cli.js" 的条目
-- WebSocket /ws 提供实时更新（文件监听 → 事件总线 → WebSocket）
-- 前端使用 hash 路由（#/dashboard、#/sessions、#/viewer/:id）
+- WebSocket /ws/chat/{session_id} 提供实时交互（broker 事件 → WebSocket → 前端）
+- 前端使用 hash 路由（#/dashboard、#/sessions、#/viewer/:project/:id）
 - 时间戳统一使用 UTC 存储，前端渲染为本地时间
 - 后端默认绑定 127.0.0.1；设置 AUTH_TOKEN 环境变量后绑定 0.0.0.0 以支持局域网访问
+- Broker 会话有双 ID：`session_id`（initial_id，稳定标识，用于 URL/WS/broker 查找）和 `claude_session_id`（Claude 真实 ID，用于 JSONL 加载）。前端 viewer 用 `_resolveSessionId()` 选择正确 ID
+- Viewer 打开时不自动连接 broker，需用户手动点击「接入会话」或「恢复会话」。唯一例外：dashboard 新建会话通过 sessionStorage 标记自动接入
+- 每个 Broker 会话存储 `launch_config`（启动参数），前端可查看配置摘要和预填充恢复对话框

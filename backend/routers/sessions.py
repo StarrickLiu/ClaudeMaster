@@ -8,6 +8,7 @@ from services.session_store import (
     get_session_detail,
     get_subagent_messages,
     get_subagents,
+    search_sessions,
 )
 
 router = APIRouter(tags=["会话"])
@@ -25,6 +26,22 @@ async def list_sessions(
 ) -> dict:
     items, total = await get_all_sessions(project, limit, offset)
     return {"items": items, "total": total}
+
+
+@router.get(
+    "/sessions/search",
+    summary="全文搜索会话",
+    description="在所有会话的用户/助手消息中搜索关键字，返回匹配的会话列表及高亮片段。",
+)
+async def search(
+    q: str = Query(..., description="搜索关键字"),
+    project: str | None = Query(None, description="编码后的项目目录名"),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict:
+    if not q.strip():
+        return {"items": [], "total": 0}
+    results = await search_sessions(q.strip(), project, limit)
+    return {"items": results, "total": len(results)}
 
 
 @router.get(

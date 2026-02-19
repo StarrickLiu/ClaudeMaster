@@ -181,21 +181,40 @@ def _raw_to_message(obj: dict[str, Any]) -> Message:
     )
 
 
+def _extract_assistant_text(content: Any) -> str | None:
+    """从 assistant 消息的 content 中提取纯文字部分。"""
+    if isinstance(content, str):
+        return content[:300] if content else None
+    if isinstance(content, list):
+        texts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                t = block.get("text", "")
+                if t:
+                    texts.append(t)
+        combined = "\n".join(texts)
+        return combined[:300] if combined else None
+    return None
+
+
 def _build_summary(
     session_id: str,
     project_path: str,
     project_name: str,
     messages: list[dict[str, Any]],
     is_active: bool = False,
+    resume_session_id: str | None = None,
 ) -> SessionSummary:
     """从原始消息列表构建会话摘要。"""
     first_message: str | None = None
+    last_assistant_text: str | None = None
     start_time: str | None = None
     end_time: str | None = None
     git_branch: str | None = None
     total_input = 0
     total_output = 0
-    user_msg_count = 0
+    user_turns = 0
+    tool_use_count = 0
 
     for msg in messages:
         ts = msg.get("timestamp", "")
@@ -206,11 +225,25 @@ def _build_summary(
         if git_branch is None:
             git_branch = msg.get("gitBranch")
 
-        if msg.get("type") == "user" and not _is_tool_result_message(msg):
-            user_msg_count += 1
+        msg_type = msg.get("type", "")
+
+        if msg_type == "user" and not _is_tool_result_message(msg):
+            user_turns += 1
             if first_message is None:
                 first_message = _extract_first_user_text(
                     msg.get("message", {}).get("content", "")
+                )
+
+        if msg_type == "assistant":
+            content = msg.get("message", {}).get("content")
+            text = _extract_assistant_text(content)
+            if text:
+                last_assistant_text = text
+            # 统计 tool_use
+            if isinstance(content, list):
+                tool_use_count += sum(
+                    1 for b in content
+                    if isinstance(b, dict) and b.get("type") == "tool_use"
                 )
 
         usage = msg.get("message", {}).get("usage")
@@ -220,9 +253,13 @@ def _build_summary(
 
     return SessionSummary(
         session_id=session_id,
+        resume_session_id=resume_session_id,
         project_path=project_path,
         project_name=project_name,
         first_message=first_message,
+        last_assistant_text=last_assistant_text,
+        user_turns=user_turns,
+        tool_use_count=tool_use_count,
         message_count=len(messages),
         start_time=start_time,
         end_time=end_time,
@@ -231,6 +268,26 @@ def _build_summary(
         total_input_tokens=total_input,
         total_output_tokens=total_output,
     )
+
+
+def _extract_resume_session_id(path: Path) -> str | None:
+    """从 JSONL 文件中提取第一个有效的内部 sessionId（用于 claude --resume）。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    sid = obj.get("sessionId")
+                    if sid and isinstance(sid, str):
+                        return sid
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        pass
+    return None
 
 
 def _get_project_info(project_encoded: str) -> tuple[str, str]:
@@ -274,7 +331,9 @@ async def get_all_sessions(
                 raw = _parse_raw_lines(jsonl_file)
                 if not raw:
                     continue
-                summary = _build_summary(session_id, project_path, project_name, raw)
+                # 从第一条消息里提取内部 sessionId（用于 claude --resume）
+                resume_id = _extract_resume_session_id(jsonl_file)
+                summary = _build_summary(session_id, project_path, project_name, raw, resume_session_id=resume_id)
                 _summary_cache[session_id] = (mtime, summary)
                 summaries.append(summary)
 
@@ -301,11 +360,150 @@ async def get_session_detail(session_id: str, project_encoded: str) -> SessionDe
         messages = [_raw_to_message(m) for m in merged]
 
         project_path, project_name = _get_project_info(project_encoded)
-        summary = _build_summary(session_id, project_path, project_name, raw)
+        resume_id = _extract_resume_session_id(path)
+        summary = _build_summary(session_id, project_path, project_name, raw, resume_session_id=resume_id)
 
         return SessionDetail(summary=summary, messages=messages)
 
     return await asyncio.to_thread(_load)
+
+
+def extract_modified_files(session_id: str) -> list[str]:
+    """从会话 JSONL 中提取被 Write/Edit 等工具修改的文件绝对路径。"""
+    path = _find_session_file(session_id)
+    if not path:
+        return []
+
+    # 只扫描 tool_use 相关的 name
+    WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
+    modified: set[str] = set()
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if obj.get("type") != "assistant":
+                continue
+            content = obj.get("message", {}).get("content")
+            if not isinstance(content, list):
+                continue
+
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_use":
+                    continue
+                name = block.get("name", "")
+                if name not in WRITE_TOOLS:
+                    continue
+                inp = block.get("input", {})
+                fp = inp.get("file_path") or inp.get("notebook_path")
+                if fp and isinstance(fp, str):
+                    modified.add(fp)
+
+    return sorted(modified)
+
+
+async def search_sessions(
+    query: str,
+    project_encoded: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """全文搜索会话内容，返回匹配的会话摘要列表（含高亮片段）。"""
+
+    def _search() -> list[dict[str, Any]]:
+        q = query.lower()
+        results: list[dict[str, Any]] = []
+        if not PROJECTS_DIR.exists():
+            return results
+
+        dirs = [PROJECTS_DIR / project_encoded] if project_encoded else sorted(PROJECTS_DIR.iterdir())
+
+        for project_dir in dirs:
+            if not project_dir.is_dir():
+                continue
+            encoded = project_dir.name
+            project_path, project_name = _get_project_info(encoded)
+
+            for jsonl_file in project_dir.glob("*.jsonl"):
+                session_id = jsonl_file.stem
+                snippets: list[str] = []
+                matched = False
+
+                try:
+                    with open(jsonl_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                obj = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            msg_type = obj.get("type", "")
+                            if msg_type not in ("user", "assistant"):
+                                continue
+                            if obj.get("isSidechain", False):
+                                continue
+
+                            content = obj.get("message", {}).get("content", "")
+                            # 提取纯文本
+                            text = ""
+                            if isinstance(content, str):
+                                text = content
+                            elif isinstance(content, list):
+                                parts = []
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        parts.append(block.get("text", ""))
+                                text = " ".join(parts)
+
+                            if q in text.lower():
+                                matched = True
+                                # 找到匹配位置，截取片段
+                                idx = text.lower().find(q)
+                                start = max(0, idx - 60)
+                                end = min(len(text), idx + len(q) + 80)
+                                snippet = ("…" if start > 0 else "") + text[start:end] + ("…" if end < len(text) else "")
+                                snippets.append(snippet)
+                                if len(snippets) >= 3:
+                                    break
+                except OSError:
+                    continue
+
+                if not matched:
+                    continue
+
+                # 构建摘要
+                mtime = jsonl_file.stat().st_mtime
+                cached = _summary_cache.get(session_id)
+                if cached and cached[0] == mtime:
+                    summary = cached[1]
+                else:
+                    raw = _parse_raw_lines(jsonl_file)
+                    if not raw:
+                        continue
+                    resume_id = _extract_resume_session_id(jsonl_file)
+                    summary = _build_summary(session_id, project_path, project_name, raw, resume_session_id=resume_id)
+                    _summary_cache[session_id] = (mtime, summary)
+
+                results.append({
+                    "summary": summary.model_dump(),
+                    "snippets": snippets,
+                })
+
+                if len(results) >= limit:
+                    return results
+
+        results.sort(key=lambda r: r["summary"].get("end_time") or "", reverse=True)
+        return results
+
+    return await asyncio.to_thread(_search)
 
 
 async def get_subagents(session_id: str, project_encoded: str) -> list[SubagentInfo]:

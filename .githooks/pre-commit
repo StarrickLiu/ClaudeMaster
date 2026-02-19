@@ -1,0 +1,9 @@
+#!/bin/sh
+# pre-commit: 提交前自动运行单元测试，任一失败则阻止提交
+set -e
+
+echo "🧪 运行单元测试（后端 + 前端）..."
+cd "$(git rev-parse --show-toplevel)"
+make test
+
+echo "✅ 所有测试通过，继续提交"
