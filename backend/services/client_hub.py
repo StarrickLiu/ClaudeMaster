@@ -4,13 +4,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from fastapi import WebSocket
 
 from services.name_generator import generate_name
+
+if TYPE_CHECKING:
+    from services.agent_config import AgentConfigStore
 
 logger = logging.getLogger(__name__)
 
@@ -63,18 +68,24 @@ class AgentConnection:
     allowed_paths: list[str] = field(default_factory=list)
     sessions: dict[str, RemoteSession] = field(default_factory=dict)  # session_id -> RemoteSession
     processes: list[dict[str, Any]] = field(default_factory=list)  # 最近上报的进程列表
+    remote_sessions: dict[str, dict[str, Any]] = field(default_factory=dict)  # session_id -> 摘要
     state: str = "connected"  # "connected" | "disconnected"
     agent_version: str = ""
+    display_name: str = ""
+    connected_at: str = ""          # ISO format
+    last_heartbeat: str = ""        # ISO format
+    latency_ms: float = 0
     _cleanup_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
 
 class ClientHub:
     """管理所有远程 cm-agent 连接的会话。"""
 
-    def __init__(self) -> None:
+    def __init__(self, agent_config: AgentConfigStore | None = None) -> None:
         self._sessions: dict[str, RemoteSession] = {}  # 双 key：initial_id + session_id
         self._agents: dict[str, AgentConnection] = {}  # agent_id -> AgentConnection
         self._pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = {}  # request_id -> Future
+        self.agent_config: AgentConfigStore | None = agent_config
 
     def get_session(self, session_id: str) -> RemoteSession | None:
         return self._sessions.get(session_id)
@@ -126,6 +137,8 @@ class ClientHub:
                 existing_agent.state = "connected"
                 existing_agent.hostname = hostname
                 existing_agent.allowed_paths = allowed_paths
+                if self.agent_config and not existing_agent.display_name:
+                    existing_agent.display_name = self.agent_config.get_display_name(existing_agent.agent_id) or existing_agent.hostname
                 # 恢复所有断线会话
                 for rs in existing_agent.sessions.values():
                     if rs.state == "disconnected":
@@ -141,6 +154,11 @@ class ClientHub:
                 allowed_paths=allowed_paths,
                 agent_version=agent_version,
             )
+            agent.connected_at = datetime.now(timezone.utc).isoformat()
+            if self.agent_config:
+                agent.display_name = self.agent_config.get_display_name(agent.agent_id) or agent.hostname
+            else:
+                agent.display_name = agent.hostname
             self._agents[client_id] = agent
             logger.info(
                 "daemon agent 注册: agent_id=%s, hostname=%s, allowed_paths=%s",
@@ -388,10 +406,60 @@ class ClientHub:
             fut.set_result(msg)
 
     async def handle_processes(self, agent: AgentConnection, msg: dict[str, Any]) -> None:
-        """处理 agent 上报的进程列表。"""
+        """处理 agent 上报的进程列表和会话摘要。"""
         items = msg.get("items", [])
         agent.processes = items
-        logger.debug("agent %s 上报 %d 个进程", agent.agent_id[:8], len(items))
+
+        # 存储远程会话摘要
+        sessions = msg.get("sessions", [])
+        if sessions:
+            agent.remote_sessions = {s["session_id"]: s for s in sessions if s.get("session_id")}
+            logger.debug("agent %s 上报 %d 个进程, %d 个会话", agent.agent_id[:8], len(items), len(sessions))
+        else:
+            logger.debug("agent %s 上报 %d 个进程", agent.agent_id[:8], len(items))
+
+    async def handle_session_detail(self, agent: AgentConnection, msg: dict[str, Any]) -> None:
+        """处理 agent 返回的完整会话内容，解锁等待中的 Future。"""
+        request_id = msg.get("request_id", "")
+        future = self._pending_requests.pop(request_id, None)
+        if future and not future.done():
+            future.set_result(msg)
+
+    async def request_session_detail(
+        self, agent_id: str, session_id: str, project_path: str, timeout: float = 30.0,
+    ) -> dict[str, Any] | None:
+        """向 agent 请求某个会话的完整 JSONL 内容，等待响应。"""
+        agent = self._agents.get(agent_id)
+        if not agent or not agent.ws:
+            return None
+
+        request_id = uuid.uuid4().hex
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        self._pending_requests[request_id] = future
+
+        try:
+            await agent.ws.send(json.dumps({
+                "type": "get_session_detail",
+                "request_id": request_id,
+                "session_id": session_id,
+                "project_path": project_path,
+            }))
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            self._pending_requests.pop(request_id, None)
+            logger.warning("请求 session_detail 超时: agent=%s, session=%s", agent_id[:8], session_id[:8])
+            return None
+        except Exception:
+            self._pending_requests.pop(request_id, None)
+            return None
+
+    async def handle_pong(self, agent: AgentConnection, msg: dict[str, Any]) -> None:
+        """处理 agent 的 pong 响应，更新延迟和心跳。"""
+        sent_ts = msg.get("ts", 0)
+        now_ms = int(time.time() * 1000)
+        agent.latency_ms = max(0, now_ms - sent_ts)
+        agent.last_heartbeat = datetime.now(timezone.utc).isoformat()
 
     async def handle_agent_event(self, agent_or_session: AgentConnection | RemoteSession, event: dict[str, Any], *, session_id: str | None = None) -> None:
         """处理 agent 上报的事件，更新状态并通知 subscribers。"""
@@ -545,6 +613,11 @@ class ClientHub:
                 "agent_version": agent.agent_version,
                 "session_count": len(agent.sessions),
                 "process_count": len(agent.processes),
+                "display_name": agent.display_name,
+                "type": "local" if agent.mode == "local" else "remote",
+                "latency_ms": agent.latency_ms,
+                "last_heartbeat": agent.last_heartbeat,
+                "connected_at": agent.connected_at,
             })
         return result
 

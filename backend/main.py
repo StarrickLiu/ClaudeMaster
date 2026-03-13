@@ -41,19 +41,21 @@ from config import AUTH_TOKEN
 from routers import projects, sessions, processes, history, diff, chat, usage, agents
 from ws.handler import router as ws_router, init_chat_handler
 from ws.agent_handler import router as agent_ws_router, init_agent_handler
+from services.agent_config import AgentConfigStore
 from services.claude_broker import broker
 from services.client_hub import ClientHub
 from services.session_registry import SessionRegistry
 
 # 实例化多客户端架构组件
-client_hub = ClientHub()
+agent_config = AgentConfigStore()
+client_hub = ClientHub(agent_config=agent_config)
 registry = SessionRegistry(broker, client_hub)
 
 # 注入依赖到各模块
 init_chat_handler(registry)
 init_agent_handler(client_hub)
 chat.init_chat_router(registry)
-agents.init_agents_router(client_hub)
+agents.init_agents_router(client_hub, agent_config, broker)
 
 
 @asynccontextmanager

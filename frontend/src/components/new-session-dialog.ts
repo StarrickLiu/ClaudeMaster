@@ -34,6 +34,10 @@ const TOOL_PRESETS: { label: string; tools: string[] }[] = [
 @customElement("cm-new-session-dialog")
 export class NewSessionDialog extends LitElement {
   @property({ type: Boolean }) open = false;
+  /** 预选远程 agent（从外部传入） */
+  @property({ attribute: false }) initialAgentId = "";
+  /** 预填项目路径（从外部传入） */
+  @property({ attribute: false }) initialPath = "";
 
   @state() private _projects: Project[] = [];
   @state() private _projectsLoading = false;
@@ -265,10 +269,21 @@ export class NewSessionDialog extends LitElement {
     }
   `;
 
-  /** 打开时自动加载项目列表 */
+  /** 打开时自动加载项目列表，并应用预选参数 */
   updated(changed: Map<string, unknown>) {
-    if (changed.has("open") && this.open && this._projects.length === 0) {
-      this._loadProjects();
+    if (changed.has("open") && this.open) {
+      if (this._projects.length === 0) {
+        this._loadProjects();
+      }
+      // 应用外部预选参数
+      if (this.initialAgentId) {
+        this._selectedAgent = this.initialAgentId;
+        this._selectedProject = "__custom__";
+      }
+      if (this.initialPath) {
+        this._selectedProject = "__custom__";
+        this._customPath = this.initialPath;
+      }
     }
   }
 

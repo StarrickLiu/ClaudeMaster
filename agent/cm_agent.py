@@ -155,6 +155,179 @@ class ProcessScanner:
         return processes
 
 
+class SessionScanner:
+    """扫描 ~/.claude/projects/ 查找 JSONL 会话并生成摘要。"""
+
+    # 不进入对话视图的消息类型
+    SKIP_TYPES = frozenset({
+        "progress", "agent_progress", "hook_progress",
+        "file-history-snapshot", "direct", "create", "update",
+        "queue-operation", "system",
+    })
+
+    def __init__(self) -> None:
+        self._projects_dir = Path.home() / ".claude" / "projects"
+
+    def _encode_path(self, cwd: str) -> str:
+        """将项目路径编码为 Claude 的目录名格式。"""
+        return cwd.replace("/", "-")
+
+    def scan_sessions_for_cwds(self, cwds: list[str]) -> list[dict]:
+        """为给定的 cwd 列表查找最新会话摘要。"""
+        if not self._projects_dir.exists():
+            return []
+
+        summaries: list[dict] = []
+        seen_cwds: set[str] = set()
+
+        for cwd in cwds:
+            if not cwd or cwd in seen_cwds:
+                continue
+            seen_cwds.add(cwd)
+
+            encoded = self._encode_path(cwd)
+            project_dir = self._projects_dir / encoded
+            if not project_dir.is_dir():
+                continue
+
+            # 找最新的 JSONL 文件
+            jsonl_files = sorted(
+                project_dir.glob("*.jsonl"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            if not jsonl_files:
+                continue
+
+            # 只取最新的一个
+            latest = jsonl_files[0]
+            try:
+                summary = self._parse_summary(latest, cwd)
+                if summary:
+                    summaries.append(summary)
+            except Exception:
+                logger.debug("解析 JSONL 失败: %s", latest, exc_info=True)
+
+        return summaries
+
+    def _parse_summary(self, path: Path, project_path: str) -> dict | None:
+        """轻量解析 JSONL 文件生成摘要。"""
+        session_id = path.stem
+        first_message = None
+        last_assistant_text = None
+        start_time = None
+        end_time = None
+        git_branch = None
+        user_turns = 0
+        tool_use_count = 0
+        message_count = 0
+        total_input = 0
+        total_output = 0
+        resume_session_id = None
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg_type = obj.get("type", "")
+                    if msg_type in self.SKIP_TYPES:
+                        continue
+                    if obj.get("isSidechain", False):
+                        continue
+
+                    message_count += 1
+                    ts = obj.get("timestamp", "")
+                    if start_time is None:
+                        start_time = ts
+                    end_time = ts
+
+                    if git_branch is None:
+                        git_branch = obj.get("gitBranch")
+
+                    if resume_session_id is None:
+                        resume_session_id = obj.get("sessionId")
+
+                    if msg_type == "user":
+                        content = obj.get("message", {}).get("content")
+                        # 跳过纯 tool_result 消息
+                        if isinstance(content, list) and all(
+                            isinstance(b, dict) and b.get("type") == "tool_result"
+                            for b in content
+                        ):
+                            continue
+                        user_turns += 1
+                        if first_message is None:
+                            if isinstance(content, str):
+                                first_message = content[:200]
+                            elif isinstance(content, list):
+                                for b in content:
+                                    if isinstance(b, dict) and b.get("type") == "text":
+                                        first_message = (b.get("text") or "")[:200]
+                                        break
+
+                    elif msg_type == "assistant":
+                        content = obj.get("message", {}).get("content")
+                        if isinstance(content, list):
+                            for b in content:
+                                if isinstance(b, dict):
+                                    if b.get("type") == "text" and b.get("text"):
+                                        last_assistant_text = b["text"][:300]
+                                    elif b.get("type") == "tool_use":
+                                        tool_use_count += 1
+
+                    usage = obj.get("message", {}).get("usage")
+                    if usage:
+                        total_input += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                        total_output += usage.get("output_tokens", 0)
+        except OSError:
+            return None
+
+        if message_count == 0:
+            return None
+
+        return {
+            "session_id": session_id,
+            "resume_session_id": resume_session_id,
+            "project_path": project_path,
+            "project_name": Path(project_path).name,
+            "first_message": first_message,
+            "last_assistant_text": last_assistant_text,
+            "user_turns": user_turns,
+            "tool_use_count": tool_use_count,
+            "message_count": message_count,
+            "start_time": start_time,
+            "end_time": end_time,
+            "git_branch": git_branch,
+            "is_active": False,
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "name": "",
+        }
+
+    def read_session_detail(self, session_id: str, project_path: str) -> dict | None:
+        """读取完整 JSONL 文件，返回原始行列表供服务端解析。"""
+        encoded = self._encode_path(project_path)
+        project_dir = self._projects_dir / encoded
+        path = project_dir / f"{session_id}.jsonl"
+        if not path.exists():
+            # 尝试子目录
+            path = project_dir / session_id / f"{session_id}.jsonl"
+            if not path.exists():
+                return None
+        try:
+            raw_lines = path.read_text(encoding="utf-8")
+            return {"session_id": session_id, "project_path": project_path, "raw_jsonl": raw_lines}
+        except OSError:
+            return None
+
+
 class AgentSession:
     """管理单个 Claude 子进程。"""
 
@@ -484,7 +657,11 @@ class CmAgent:
         """处理服务端下发的消息。"""
         msg_type = msg.get("type")
 
-        if msg_type == "start_session":
+        if msg_type == "ping":
+            # 服务端心跳探测，原样回复 pong
+            await self._send({"type": "pong", "ts": msg.get("ts", 0)})
+
+        elif msg_type == "start_session":
             # daemon 模式：服务端请求启动新会话
             await self._handle_start_session(msg)
 
@@ -495,6 +672,10 @@ class CmAgent:
         elif msg_type == "query_processes":
             # daemon 模式：服务端查询进程
             await self._send_processes()
+
+        elif msg_type == "get_session_detail":
+            # 服务端请求某个会话的完整 JSONL 内容
+            await self._handle_get_session_detail(msg)
 
         elif msg_type == "user_message":
             session_id = msg.get("session_id")
@@ -633,6 +814,37 @@ class CmAgent:
             await sess.stop()
             # cleanup 由 _on_session_exit 处理
 
+    async def _handle_get_session_detail(self, msg: dict) -> None:
+        """处理服务端请求会话完整内容。"""
+        request_id = msg.get("request_id", "")
+        session_id = msg.get("session_id", "")
+        project_path = msg.get("project_path", "")
+
+        scanner = SessionScanner()
+        detail = scanner.read_session_detail(session_id, project_path)
+
+        if detail and self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "session_detail",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "project_path": project_path,
+                    "raw_jsonl": detail["raw_jsonl"],
+                }))
+            except Exception:
+                logger.debug("发送 session_detail 失败", exc_info=True)
+        elif self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "session_detail",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "error": "会话文件不存在",
+                }))
+            except Exception:
+                pass
+
     async def _on_session_event(self, session_id: str, event: dict) -> None:
         """AgentSession 上报事件的回调。"""
         if self.ws:
@@ -670,26 +882,43 @@ class CmAgent:
     async def _process_scan_loop(self) -> None:
         """定期扫描进程并上报。"""
         scanner = ProcessScanner(self._managed_pids)
+        session_scanner = SessionScanner()
         while self._running:
             try:
                 await asyncio.sleep(PROCESS_SCAN_INTERVAL)
-                await self._send_processes(scanner)
+                await self._send_processes(scanner, session_scanner)
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.debug("进程扫描异常", exc_info=True)
 
-    async def _send_processes(self, scanner: ProcessScanner | None = None) -> None:
-        """扫描并上报进程列表。"""
+    async def _send_processes(
+        self,
+        scanner: ProcessScanner | None = None,
+        session_scanner: SessionScanner | None = None,
+    ) -> None:
+        """扫描并上报进程列表和会话摘要。"""
         if not self.ws:
             return
         if scanner is None:
             scanner = ProcessScanner(self._managed_pids)
         items = scanner.scan()
+
+        # 同时扫描每个进程 cwd 对应的最新 JSONL 会话
+        sessions: list[dict] = []
+        if session_scanner is None:
+            session_scanner = SessionScanner()
+        cwds = [p["cwd"] for p in items if p.get("cwd")]
+        try:
+            sessions = session_scanner.scan_sessions_for_cwds(cwds)
+        except Exception:
+            logger.debug("会话扫描异常", exc_info=True)
+
         try:
             await self.ws.send(json.dumps({
                 "type": "processes",
                 "items": items,
+                "sessions": sessions,
             }))
         except Exception:
             pass

@@ -1,8 +1,10 @@
 # Agent WebSocket 端点：cm-agent 客户端与服务端的通信通道
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
@@ -81,6 +83,17 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
         await websocket.close(code=4000, reason="注册失败")
         return
 
+    async def _ping_loop(ws: WebSocket, interval: float = 30.0) -> None:
+        """定期向 agent 发送 ping 消息以检测延迟和连接状态。"""
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                await ws.send_json({"type": "ping", "ts": int(time.time() * 1000)})
+        except Exception:
+            pass
+
+    ping_task = asyncio.create_task(_ping_loop(websocket))
+
     try:
         while True:
             raw = await websocket.receive_text()
@@ -124,6 +137,16 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
                 if agent:
                     await _client_hub.handle_processes(agent, msg)
 
+            elif msg_type == "pong":
+                # agent 的 pong 响应
+                if agent:
+                    await _client_hub.handle_pong(agent, msg)
+
+            elif msg_type == "session_detail":
+                # agent 返回的完整会话内容
+                if agent:
+                    await _client_hub.handle_session_detail(agent, msg)
+
             else:
                 logger.debug("agent 未知消息类型: %s", msg_type)
 
@@ -132,4 +155,5 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
     except Exception:
         logger.error("agent WebSocket 异常", exc_info=True)
     finally:
+        ping_task.cancel()
         await _client_hub.unregister_agent(client_id)

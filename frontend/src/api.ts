@@ -207,12 +207,17 @@ export interface ChatSessionInfo {
 export interface AgentInfo {
   agent_id: string;
   hostname: string;
+  display_name: string;
+  type: string;
   state: string;
   mode: string;
   allowed_paths: string[];
   agent_version: string;
   session_count: number;
   process_count: number;
+  latency_ms: number;
+  last_heartbeat: string;
+  connected_at: string;
 }
 
 export interface RemoteProcess {
@@ -353,4 +358,13 @@ export const api = {
 
   getAgentProcesses: (agentId: string) =>
     request<RemoteProcess[]>(`/api/agents/${agentId}/processes`),
+
+  getAgentSessions: (agentId: string) =>
+    request<SessionSummary[]>(`/api/agents/${agentId}/sessions`),
+
+  getAgentSessionDetail: (agentId: string, sessionId: string) =>
+    request<SessionDetail>(`/api/agents/${agentId}/sessions/${sessionId}`),
+
+  updateAgent: (agentId: string, update: { display_name?: string }) =>
+    requestPatch<{ agent_id: string; display_name: string }>(`/api/agents/${agentId}`, update),
 };
