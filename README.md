@@ -71,6 +71,43 @@ AUTH_TOKEN=your-secret-token make https
 CM_LISTEN=:443 CM_BACKEND=127.0.0.1:8421 AUTH_TOKEN=your-secret-token make https
 ```
 
+### 远程接入（cm-agent）
+
+在任意远程机器上运行 cm-agent，即可将该机器的 Claude Code 会话接入 ClaudeMaster 统一管理。
+
+**远程机器上安装：**
+
+```bash
+# 只需要 agent 脚本和 websockets 库
+pip install websockets
+curl -O https://raw.githubusercontent.com/StarrickLiu/ClaudeMaster/main/agent/cm_agent.py
+chmod +x cm_agent.py
+```
+
+**启动 agent：**
+
+```bash
+# 基本用法：连接服务端并在指定项目目录启动 Claude
+./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token --project /path/to/project
+
+# 恢复已有会话
+./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token --project /path/to/project -- --resume <session-id>
+
+# 所有 -- 之后的参数透传给 Claude CLI
+./cm_agent.py --server wss://my-server:8420 --token secret --project . -- --model sonnet --allowedTools "Bash,Read"
+```
+
+**参数说明：**
+
+| 参数 | 说明 |
+|------|------|
+| `--server` | ClaudeMaster 服务端 WebSocket 地址（`ws://` 或 `wss://`） |
+| `--token` | 认证令牌（与服务端 `AUTH_TOKEN` 一致） |
+| `--project` | Claude Code 工作目录（默认当前目录） |
+| `-- ...` | 透传给 Claude CLI 的额外参数 |
+
+连接成功后，远程会话会自动出现在工作台上，显示主机名标识，操作方式与本地会话完全一致。agent 支持断线自动重连（最长等待 30 秒）。
+
 ## 技术栈
 
 | 层 | 技术 |
