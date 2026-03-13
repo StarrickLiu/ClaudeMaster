@@ -34,6 +34,7 @@ class SessionRegistry:
             item["source"] = "local"
             item["hostname"] = None
             item["client_id"] = None
+            item["agent_id"] = None
             result.append(item)
         result.extend(self._hub.list_sessions())
         return result
@@ -96,9 +97,7 @@ class SessionRegistry:
         if isinstance(session, ClaudeSession):
             await self._broker.stop_session(session_id)
         elif isinstance(session, RemoteSession):
-            session.state = "closed"
-            await session._notify({"type": "_internal", "subtype": "closed"})
-            self._hub._cleanup_session(session)
+            await self._hub.stop_remote_session(session)
 
     async def send_interrupt(self, session_id: str) -> None:
         """发送中断指令，自动路由。"""
@@ -110,3 +109,18 @@ class SessionRegistry:
             await self._broker.send_interrupt(session_id)
         elif isinstance(session, RemoteSession):
             await self._hub.send_to_agent(session, {"type": "interrupt"})
+
+    async def start_remote_session(
+        self,
+        agent_id: str,
+        project_path: str,
+        claude_args: list[str] | None = None,
+        name: str | None = None,
+    ) -> RemoteSession:
+        """在远程 agent 上启动新会话。"""
+        return await self._hub.start_remote_session(
+            agent_id=agent_id,
+            project_path=project_path,
+            claude_args=claude_args,
+            name=name,
+        )

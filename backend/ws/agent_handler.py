@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from config import AUTH_TOKEN
-from services.client_hub import ClientHub
+from services.client_hub import ClientHub, AgentConnection, RemoteSession
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -54,16 +54,32 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
         return
 
     # 注册 agent
-    rs = await _client_hub.register_agent(client_id, websocket, reg_msg)
+    result = await _client_hub.register_agent(client_id, websocket, reg_msg)
 
-    # 回复注册确认
-    await websocket.send_json({
-        "type": "registered",
-        "session_id": rs.initial_id,
-        "name": rs.name,
-    })
-
-    logger.info("agent WebSocket 已建立: client_id=%s, name=%s", client_id[:8], rs.name)
+    # 根据返回类型发送不同的确认
+    if isinstance(result, AgentConnection):
+        # daemon 模式：返回 agent 信息
+        await websocket.send_json({
+            "type": "registered",
+            "agent_id": result.agent_id,
+            "name": result.hostname,
+            "mode": "daemon",
+        })
+        logger.info("daemon agent WebSocket 已建立: agent_id=%s, hostname=%s", client_id[:8], result.hostname)
+        agent = result
+    elif isinstance(result, RemoteSession):
+        # oneshot 模式（向后兼容）：返回 session 信息
+        await websocket.send_json({
+            "type": "registered",
+            "session_id": result.initial_id,
+            "name": result.name,
+        })
+        logger.info("oneshot agent WebSocket 已建立: client_id=%s, name=%s", client_id[:8], result.name)
+        agent = _client_hub.get_agent(client_id)
+    else:
+        await websocket.send_json({"type": "error", "message": "注册失败"})
+        await websocket.close(code=4000, reason="注册失败")
+        return
 
     try:
         while True:
@@ -75,16 +91,38 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
                 continue
 
             msg_type = msg.get("type")
+            session_id = msg.get("session_id")
 
             if msg_type == "event":
                 # Claude stdout 事件转发
                 event = msg.get("event")
                 if event and isinstance(event, dict):
-                    await _client_hub.handle_agent_event(rs, event)
+                    if agent:
+                        await _client_hub.handle_agent_event(
+                            agent, event, session_id=session_id,
+                        )
 
             elif msg_type == "agent_status":
                 # agent 状态报告（如 Claude 退出）
-                await _client_hub.handle_agent_status(rs, msg)
+                if agent:
+                    await _client_hub.handle_agent_status(
+                        agent, msg, session_id=session_id,
+                    )
+
+            elif msg_type == "session_started":
+                # daemon agent 报告新会话已启动
+                if agent:
+                    await _client_hub.handle_session_started(agent, msg)
+
+            elif msg_type == "session_start_failed":
+                # daemon agent 报告会话启动失败
+                if agent:
+                    await _client_hub.handle_session_start_failed(agent, msg)
+
+            elif msg_type == "processes":
+                # daemon agent 上报进程列表
+                if agent:
+                    await _client_hub.handle_processes(agent, msg)
 
             else:
                 logger.debug("agent 未知消息类型: %s", msg_type)

@@ -38,7 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import AUTH_TOKEN
-from routers import projects, sessions, processes, history, diff, chat, usage
+from routers import projects, sessions, processes, history, diff, chat, usage, agents
 from ws.handler import router as ws_router, init_chat_handler
 from ws.agent_handler import router as agent_ws_router, init_agent_handler
 from services.claude_broker import broker
@@ -53,6 +53,7 @@ registry = SessionRegistry(broker, client_hub)
 init_chat_handler(registry)
 init_agent_handler(client_hub)
 chat.init_chat_router(registry)
+agents.init_agents_router(client_hub)
 
 
 @asynccontextmanager
@@ -94,6 +95,7 @@ app.include_router(history.router, prefix="/api")
 app.include_router(diff.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(usage.router, prefix="/api")
+app.include_router(agents.router, prefix="/api")
 app.include_router(ws_router)
 app.include_router(agent_ws_router)
 

@@ -200,6 +200,27 @@ export interface ChatSessionInfo {
   hostname: string | null;
   /** 远程会话的 client_id */
   client_id: string | null;
+  /** 远程会话所属 agent_id */
+  agent_id: string | null;
+}
+
+export interface AgentInfo {
+  agent_id: string;
+  hostname: string;
+  state: string;
+  mode: string;
+  allowed_paths: string[];
+  agent_version: string;
+  session_count: number;
+  process_count: number;
+}
+
+export interface RemoteProcess {
+  pid: number;
+  cwd: string;
+  uptime_seconds: number;
+  project_name: string | null;
+  managed: boolean;
 }
 
 export interface SearchResult {
@@ -289,6 +310,7 @@ export const api = {
       model?: string;
       addDirs?: string[];
       name?: string;
+      agentId?: string;
     }
   ) =>
     requestPost<ChatSessionInfo>("/api/chat/start", {
@@ -302,6 +324,7 @@ export const api = {
       model: options?.model ?? null,
       add_dirs: options?.addDirs ?? null,
       name: options?.name ?? null,
+      agent_id: options?.agentId ?? null,
     }),
 
   stopChat: (sessionId: string) =>
@@ -324,4 +347,10 @@ export const api = {
 
   updateSessionName: (sessionId: string, name: string) =>
     requestPatch<{ session_id: string; name: string }>(`/api/sessions/${sessionId}/name`, { name }),
+
+  getAgents: () =>
+    request<AgentInfo[]>("/api/agents"),
+
+  getAgentProcesses: (agentId: string) =>
+    request<RemoteProcess[]>(`/api/agents/${agentId}/processes`),
 };

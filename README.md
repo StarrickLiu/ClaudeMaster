@@ -84,27 +84,53 @@ curl -O https://raw.githubusercontent.com/StarrickLiu/ClaudeMaster/main/agent/cm
 chmod +x cm_agent.py
 ```
 
-**启动 agent：**
+#### Daemon 模式（推荐）
+
+cm-agent 作为常驻守护进程运行，自动发现远程机器上所有运行中的 Claude Code 实例，并支持从工作台远程启动新会话。
+
+```bash
+# 常驻模式：不绑定具体 Claude 进程，等待工作台指令
+./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token
+
+# 限制可启动 Claude 的目录（安全白名单）
+./cm_agent.py --server wss://<服务端IP>:8420 --token secret --allowed-paths /home/user/projects /tmp/test
+
+# 不限制目录
+./cm_agent.py --server wss://<服务端IP>:8420 --token secret
+```
+
+daemon 模式特性：
+- **常驻运行**：agent 持续在线，无需每次手动启动
+- **多会话管理**：一个 agent 同时管理多个 Claude 会话
+- **进程发现**：每 10 秒扫描系统中的 Claude Code 进程，在工作台展示
+- **远程启动**：在工作台新建会话时选择远程 agent 和目录
+- **持久 ID**：client_id 存储在 `~/.config/cm-agent/agent.json`，重启后自动重连
+- **安全白名单**：`--allowed-paths` 限制可启动 Claude 的目录范围
+
+#### Oneshot 模式（向后兼容）
+
+检测到 `--` 参数时自动进入 oneshot 模式，绑定单个 Claude 进程，进程退出后 agent 也退出。
 
 ```bash
 # 基本用法：连接服务端并在指定项目目录启动 Claude
-./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token --project /path/to/project
+./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token --project /path/to/project --
 
 # 恢复已有会话
-./cm_agent.py --server wss://<服务端IP>:8420 --token your-secret-token --project /path/to/project -- --resume <session-id>
+./cm_agent.py --server wss://<服务端IP>:8420 --token secret --project /path/to/project -- --resume <session-id>
 
 # 所有 -- 之后的参数透传给 Claude CLI
 ./cm_agent.py --server wss://my-server:8420 --token secret --project . -- --model sonnet --allowedTools "Bash,Read"
 ```
 
-**参数说明：**
+#### 参数说明
 
 | 参数 | 说明 |
 |------|------|
 | `--server` | ClaudeMaster 服务端 WebSocket 地址（`ws://` 或 `wss://`） |
 | `--token` | 认证令牌（与服务端 `AUTH_TOKEN` 一致） |
-| `--project` | Claude Code 工作目录（默认当前目录） |
-| `-- ...` | 透传给 Claude CLI 的额外参数 |
+| `--project` | Claude Code 工作目录（默认当前目录，oneshot 模式） |
+| `--allowed-paths` | daemon 模式允许启动 Claude 的目录列表 |
+| `-- ...` | 透传给 Claude CLI 的额外参数（有此参数时进入 oneshot 模式） |
 
 连接成功后，远程会话会自动出现在工作台上，显示主机名标识，操作方式与本地会话完全一致。agent 支持断线自动重连（最长等待 30 秒）。
 

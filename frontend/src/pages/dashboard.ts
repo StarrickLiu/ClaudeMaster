@@ -2,7 +2,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { api } from "../api.js";
-import type { ClaudeProcess, SessionSummary, UsageResponse, QuotaResponse, ChatSessionInfo } from "../api.js";
+import type { ClaudeProcess, SessionSummary, UsageResponse, QuotaResponse, ChatSessionInfo, AgentInfo, RemoteProcess } from "../api.js";
 import "../components/session-card.js";
 import "../components/process-card.js";
 import "../components/usage-card.js";
@@ -14,6 +14,8 @@ export class DashboardPage extends LitElement {
   @state() processes: ClaudeProcess[] = [];
   @state() sessions: SessionSummary[] = [];
   @state() chatSessions: ChatSessionInfo[] = [];
+  @state() agents: AgentInfo[] = [];
+  @state() agentProcesses: Map<string, RemoteProcess[]> = new Map();
   @state() usage: UsageResponse | null = null;
   @state() quota: QuotaResponse | null = null;
   @state() loading = true;
@@ -280,18 +282,33 @@ export class DashboardPage extends LitElement {
   }
 
   private async _fetchAll() {
-    const [procs, sessData, chatSess, usageData, quotaData] = await Promise.all([
+    const [procs, sessData, chatSess, agentsData, usageData, quotaData] = await Promise.all([
       api.getProcesses(),
       api.getSessions({ limit: "20" }),
       api.listChatSessions().catch(() => [] as ChatSessionInfo[]),
+      api.getAgents().catch(() => [] as AgentInfo[]),
       api.getUsage().catch(() => null),
       api.getQuota().catch(() => null),
     ]);
 
     this.processes = procs;
     this.chatSessions = chatSess;
+    this.agents = agentsData;
     this.usage = usageData;
     this.quota = quotaData;
+
+    // 获取 daemon agent 的远程进程
+    const daemonAgents = agentsData.filter(a => a.mode === "daemon" && a.state === "connected");
+    if (daemonAgents.length > 0) {
+      const processResults = await Promise.all(
+        daemonAgents.map(a =>
+          api.getAgentProcesses(a.agent_id)
+            .then(ps => [a.agent_id, ps] as [string, RemoteProcess[]])
+            .catch(() => [a.agent_id, []] as [string, RemoteProcess[]])
+        )
+      );
+      this.agentProcesses = new Map(processResults);
+    }
 
     const activeCwds = new Set(procs.map(p => p.cwd));
     const sessions = sessData.items.map(s => ({
@@ -326,18 +343,34 @@ export class DashboardPage extends LitElement {
     this.sessions = sessions;
   }
 
-  /** 轻量轮询：只刷新进程和 broker 会话状态 */
+  /** 轻量轮询：刷新进程、broker 会话和 agent 状态 */
   private async _pollActive() {
     const hasActive =
-      this.processes.length > 0 || this.chatSessions.length > 0;
+      this.processes.length > 0 || this.chatSessions.length > 0 || this.agents.length > 0;
     if (!hasActive) return;
     try {
-      const [procs, chatSess] = await Promise.all([
+      const [procs, chatSess, agentsData] = await Promise.all([
         api.getProcesses(),
         api.listChatSessions().catch(() => this.chatSessions),
+        api.getAgents().catch(() => this.agents),
       ]);
       this.processes = procs;
       this.chatSessions = chatSess;
+      this.agents = agentsData;
+
+      // 刷新 daemon agent 的远程进程
+      const daemonAgents = agentsData.filter(a => a.mode === "daemon" && a.state === "connected");
+      if (daemonAgents.length > 0) {
+        const processResults = await Promise.all(
+          daemonAgents.map(a =>
+            api.getAgentProcesses(a.agent_id)
+              .then(ps => [a.agent_id, ps] as [string, RemoteProcess[]])
+              .catch(() => [a.agent_id, []] as [string, RemoteProcess[]])
+          )
+        );
+        this.agentProcesses = new Map(processResults);
+      }
+
       const activeCwds = new Set(procs.map(p => p.cwd));
       this.sessions = this.sessions.map(s => ({
         ...s,
@@ -362,7 +395,7 @@ export class DashboardPage extends LitElement {
   }
 
   private async _onNewSession(e: CustomEvent<NewSessionConfig>) {
-    const { projectPath, name, ...launchConfig } = e.detail;
+    const { projectPath, name, agentId, ...launchConfig } = e.detail;
     this._newSessionOpen = false;
     this._newSessionStarting = true;
     try {
@@ -375,6 +408,7 @@ export class DashboardPage extends LitElement {
         appendSystemPrompt: launchConfig.appendSystemPrompt || undefined,
         addDirs: launchConfig.addDirs.length > 0 ? launchConfig.addDirs : undefined,
         name: name || undefined,
+        agentId: agentId || undefined,
       });
       // 将 project_path 存入 sessionStorage，viewer 优先从这里读，
       // 避免依赖 broker 会话在跳转后仍然在线
@@ -418,6 +452,17 @@ export class DashboardPage extends LitElement {
     const legacyProcesses = this.processes
       .filter(p => !brokerPaths.has(p.cwd))
       .filter((p, i, arr) => arr.findIndex(q => q.cwd === p.cwd) === i);
+
+    // 远程独立进程（非 managed）
+    const remoteUnmanagedProcesses: { agent: AgentInfo; process: RemoteProcess }[] = [];
+    for (const agent of this.agents) {
+      const procs = this.agentProcesses.get(agent.agent_id) || [];
+      for (const p of procs) {
+        if (!p.managed) {
+          remoteUnmanagedProcesses.push({ agent, process: p });
+        }
+      }
+    }
 
     // 每个 legacy 进程只"占用"该项目最新的一条 JSONL 会话（其余历史会话仍出现在最近会话）
     const legacyMatchedIds = new Set(
@@ -558,13 +603,13 @@ export class DashboardPage extends LitElement {
         </div>
       ` : nothing}
 
-      <!-- 待命中：broker idle 会话 + legacy 进程 + 24h 内结束的会话 -->
-      ${(idleSessions.length > 0 || legacyProcesses.length > 0 || standbyTimeSessions.length > 0) ? html`
+      <!-- 待命中：broker idle 会话 + legacy 进程 + 远程独立进程 + 24h 内结束的会话 -->
+      ${(idleSessions.length > 0 || legacyProcesses.length > 0 || remoteUnmanagedProcesses.length > 0 || standbyTimeSessions.length > 0) ? html`
         <div class="section">
           <div class="section-title">
             <span class="status-dot dot-standby"></span>
             待命中
-            <span class="count">(${idleSessions.length + legacyProcesses.length + standbyTimeSessions.length})</span>
+            <span class="count">(${idleSessions.length + legacyProcesses.length + remoteUnmanagedProcesses.length + standbyTimeSessions.length})</span>
             <button class="refresh-btn" @click=${this._fetchAll.bind(this)}>刷新</button>
           </div>
           <div class="card-grid">
@@ -606,6 +651,16 @@ export class DashboardPage extends LitElement {
               if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""}></cm-session-card>`;
               return html`<cm-process-card .data=${p}></cm-process-card>`;
             })}
+            ${remoteUnmanagedProcesses.map(({ agent, process: p }) => html`
+              <div class="pending-card" style="border-color: var(--color-standby)">
+                <div class="pending-card-header">
+                  <span class="pending-badge" style="background:var(--color-standby-bg);color:var(--color-standby)">待命中</span>
+                  <span class="remote-badge">${agent.hostname}</span>
+                  <span class="pending-project" title=${p.cwd}>${p.project_name || p.cwd}</span>
+                </div>
+                <div class="pending-hint">PID ${p.pid} · ${p.cwd}</div>
+              </div>
+            `)}
             ${standbyTimeSessions.map(s => html`<cm-session-card .data=${s} .brokerName=${s.name || ""}></cm-session-card>`)}
           </div>
         </div>
