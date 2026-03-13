@@ -128,10 +128,7 @@ class ProcessScanner:
             if "--chrome-native-host" in cmdline:
                 continue
 
-            try:
-                cwd = str((pid_dir / "cwd").resolve())
-            except (PermissionError, FileNotFoundError, OSError):
-                cwd = ""
+            cwd = self._read_cwd(pid_dir, cmdline_bytes)
 
             uptime_seconds = 0.0
             try:
@@ -154,6 +151,37 @@ class ProcessScanner:
             })
 
         return processes
+
+    @staticmethod
+    def _read_cwd(pid_dir: Path, cmdline_bytes: bytes) -> str:
+        """尝试多种方式获取进程工作目录。"""
+        # 方式1：直接读 /proc/{pid}/cwd 符号链接
+        try:
+            return str((pid_dir / "cwd").resolve())
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        # 方式2：从 /proc/{pid}/environ 中提取 PWD
+        try:
+            environ_bytes = (pid_dir / "environ").read_bytes()
+            for entry in environ_bytes.split(b"\x00"):
+                if entry.startswith(b"PWD="):
+                    pwd = entry[4:].decode("utf-8", errors="replace")
+                    if pwd and pwd.startswith("/"):
+                        return pwd
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        # 方式3：从 cmdline 参数中查找 -p 后的项目路径或 --add-dir
+        args = cmdline_bytes.split(b"\x00")
+        args_str = [a.decode("utf-8", errors="replace") for a in args if a]
+        for i, arg in enumerate(args_str):
+            if arg == "-p" and i + 1 < len(args_str):
+                candidate = args_str[i + 1]
+                if candidate.startswith("/"):
+                    return candidate
+
+        return ""
 
 
 class SessionScanner:
