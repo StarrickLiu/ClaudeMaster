@@ -560,8 +560,8 @@ export class DashboardPage extends LitElement {
       // 按 cwd 分组
       const cwdMap = new Map<string, RemoteProcessGroup>();
       for (const p of procs) {
-        if (!p.managed && (p.cwd || p.project_name)) {
-          const key = p.cwd || p.project_name || "";
+        if (!p.managed) {
+          const key = p.cwd || p.project_name || `_orphan_${agent.agent_id}`;
           let group = cwdMap.get(key);
           if (!group) {
             group = {
@@ -820,7 +820,7 @@ export class DashboardPage extends LitElement {
               return html`<cm-process-card .data=${p}></cm-process-card>`;
             })}
             ${remoteStandbyGroups.map((group) => {
-              const machine = showMachineBadge ? (agentNameMap.get(group.agent.agent_id) || group.agent.hostname) : "";
+              const machine = agentNameMap.get(group.agent.agent_id) || group.agent.hostname;
               if (group.session && group.pids.length === 1) {
                 // 单个进程有匹配 JSONL 会话 → session-card
                 return html`<cm-session-card
@@ -830,7 +830,7 @@ export class DashboardPage extends LitElement {
                 ></cm-session-card>`;
               }
               // 多进程或无会话 → 合并卡片
-              const projectName = group.projectName || group.cwd.split("/").pop() || group.cwd;
+              const projectName = group.projectName || (group.cwd ? group.cwd.split("/").pop() : "") || "未知路径";
               return html`
                 <div class="pending-card" style="border-color: var(--color-standby)">
                   <div class="pending-card-header">
@@ -847,7 +847,7 @@ export class DashboardPage extends LitElement {
                       }}
                     >清理</button>
                   </div>
-                  <div class="pending-hint">${group.cwd} · 运行 ${this._formatUptime(Math.round(group.totalUptime))}</div>
+                  <div class="pending-hint">${group.cwd || "路径不可读"} · 运行 ${this._formatUptime(Math.round(group.totalUptime))}</div>
                 </div>
               `;
             })}
