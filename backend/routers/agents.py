@@ -165,6 +165,27 @@ async def get_agent_session_detail(agent_id: str, session_id: str, project: str 
     }
 
 
+@router.post(
+    "/agents/{agent_id}/kill-processes",
+    summary="终止 agent 上的指定进程",
+    description="向 agent 发送 kill 命令，终止指定 pid 列表中的 Claude 进程。不能终止 agent 自身和已托管的进程。",
+)
+async def kill_agent_processes(agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    if _client_hub is None:
+        raise RuntimeError("ClientHub 未初始化")
+    pids = body.get("pids", [])
+    if not pids or not isinstance(pids, list):
+        raise HTTPException(status_code=400, detail="缺少 pids 参数")
+    try:
+        result = await _client_hub.kill_agent_processes(agent_id, pids)
+        return {
+            "killed": result.get("killed", []),
+            "failed": result.get("failed", []),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.patch(
     "/agents/{agent_id}",
     summary="更新 agent 配置",

@@ -147,6 +147,14 @@ async def agent_ws(websocket: WebSocket, client_id: str) -> None:
                 if agent:
                     await _client_hub.handle_session_detail(agent, msg)
 
+            elif msg_type == "kill_processes_result":
+                # agent 返回的进程终止结果
+                request_id = msg.get("request_id", "")
+                if request_id and agent:
+                    fut = _client_hub._pending_requests.pop(request_id, None)
+                    if fut and not fut.done():
+                        fut.set_result(msg)
+
             else:
                 logger.debug("agent 未知消息类型: %s", msg_type)
 

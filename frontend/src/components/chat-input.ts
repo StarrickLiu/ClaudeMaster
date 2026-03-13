@@ -6,8 +6,14 @@ import type { ChatState } from "../services/chat-client.js";
 @customElement("cm-chat-input")
 export class ChatInput extends LitElement {
   @property() chatState: ChatState = "closed";
+  /** 心跳是否超时（远程会话专用） */
+  @property({ type: Boolean }) heartbeatStale = false;
+  /** streaming 状态开始的时间戳（用于显示等待时长） */
+  @property({ type: Number }) streamingSince = 0;
   @state() private text = "";
+  @state() private _elapsed = "";
   @query("textarea") private textarea!: HTMLTextAreaElement;
+  private _elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
   static styles = css`
     :host {
@@ -108,6 +114,10 @@ export class ChatInput extends LitElement {
       animation: pulse 1s infinite;
     }
     .dot-closed { background: var(--color-done); }
+    .dot-stale {
+      background: var(--color-attention);
+      animation: pulse 0.6s infinite;
+    }
     .dot-error { background: var(--color-error); }
     .dot-connecting {
       background: var(--color-attention);
@@ -130,6 +140,32 @@ export class ChatInput extends LitElement {
       }
     }
   `;
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._elapsedTimer = setInterval(() => this._updateElapsed(), 1000);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    if (this._elapsedTimer) {
+      clearInterval(this._elapsedTimer);
+      this._elapsedTimer = null;
+    }
+  }
+
+  private _updateElapsed() {
+    if (!this.streamingSince || (this.chatState !== "streaming" && this.chatState !== "starting")) {
+      if (this._elapsed) this._elapsed = "";
+      return;
+    }
+    const sec = Math.floor((Date.now() - this.streamingSince) / 1000);
+    if (sec < 1) { this._elapsed = ""; return; }
+    if (sec < 60) { this._elapsed = `${sec}s`; return; }
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    this._elapsed = s > 0 ? `${m}m${s}s` : `${m}m`;
+  }
 
   private _onInput(e: Event) {
     this.text = (e.target as HTMLTextAreaElement).value;
@@ -180,6 +216,9 @@ export class ChatInput extends LitElement {
   }
 
   private _statusText(): string {
+    if (this.heartbeatStale && this.chatState !== "idle" && this.chatState !== "closed") {
+      return "连接异常，等待恢复...";
+    }
     const map: Record<string, string> = {
       connecting: "正在连接...",
       connected: "已连接",
@@ -190,7 +229,11 @@ export class ChatInput extends LitElement {
       closed: "已断开 · 发消息将自动重连",
       error: "连接失败",
     };
-    return map[this.chatState] || this.chatState;
+    const base = map[this.chatState] || this.chatState;
+    if (this._elapsed && (this.chatState === "streaming" || this.chatState === "starting")) {
+      return `${base} (${this._elapsed})`;
+    }
+    return base;
   }
 
   render() {
@@ -216,7 +259,7 @@ export class ChatInput extends LitElement {
             </button>`}
       </div>
       <div class="status-bar">
-        <span class="status-dot dot-${this.chatState}"></span>
+        <span class="status-dot ${this.heartbeatStale && this.chatState !== "idle" && this.chatState !== "closed" ? "dot-stale" : `dot-${this.chatState}`}"></span>
         <span>${this._statusText()}</span>
       </div>
     `;

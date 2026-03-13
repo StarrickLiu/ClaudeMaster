@@ -22,6 +22,7 @@ import shutil
 import signal
 import ssl
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -414,6 +415,7 @@ class AgentSession:
             asyncio.create_task(self._read_stdout()),
             asyncio.create_task(self._read_stderr()),
             asyncio.create_task(self._wait_exit()),
+            asyncio.create_task(self._heartbeat_loop()),
         ]
 
     async def stop(self) -> None:
@@ -455,6 +457,20 @@ class AgentSession:
             pass
         except Exception:
             logger.error("[session:%s] 读取 stdout 异常", self.session_id[:8], exc_info=True)
+
+    async def _heartbeat_loop(self) -> None:
+        """每 3 秒向后端发送会话级心跳，让前端知道进程仍在运行。"""
+        try:
+            while True:
+                await asyncio.sleep(3)
+                await self._on_event(self.session_id, {
+                    "type": "session_heartbeat",
+                    "ts": int(time.time() * 1000),
+                })
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("[session:%s] 心跳循环异常", self.session_id[:8], exc_info=True)
 
     async def _read_stderr(self) -> None:
         """读取 Claude stderr。"""
@@ -703,6 +719,10 @@ class CmAgent:
             # daemon 模式：服务端请求停止会话
             await self._handle_stop_session(msg)
 
+        elif msg_type == "kill_processes":
+            # daemon 模式：服务端请求终止指定进程
+            await self._handle_kill_processes(msg)
+
         elif msg_type == "query_processes":
             # daemon 模式：服务端查询进程
             await self._send_processes()
@@ -847,6 +867,52 @@ class CmAgent:
         if sess:
             await sess.stop()
             # cleanup 由 _on_session_exit 处理
+
+    async def _handle_kill_processes(self, msg: dict) -> None:
+        """处理服务端的 kill_processes 请求，终止指定 pid 列表。"""
+        pids: list[int] = msg.get("pids", [])
+        request_id = msg.get("request_id", "")
+        killed: list[int] = []
+        failed: list[int] = []
+
+        # 安全检查：不能 kill agent 自身和已托管的进程
+        my_pid = os.getpid()
+        for pid in pids:
+            if pid == my_pid:
+                logger.warning("拒绝 kill 自身进程 pid=%d", pid)
+                failed.append(pid)
+                continue
+            if pid in self._managed_pids:
+                logger.warning("拒绝 kill 托管进程 pid=%d，请使用 stop_session", pid)
+                failed.append(pid)
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+                logger.info("已终止进程 pid=%d", pid)
+            except ProcessLookupError:
+                killed.append(pid)  # 已经不存在，视为成功
+            except PermissionError:
+                logger.warning("无权终止进程 pid=%d", pid)
+                failed.append(pid)
+            except Exception as e:
+                logger.warning("终止进程 pid=%d 失败: %s", pid, e)
+                failed.append(pid)
+
+        if self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "kill_processes_result",
+                    "request_id": request_id,
+                    "killed": killed,
+                    "failed": failed,
+                }))
+            except Exception:
+                pass
+
+        # 清理后立即重新上报进程列表
+        await asyncio.sleep(0.5)
+        await self._send_processes()
 
     async def _handle_get_session_detail(self, msg: dict) -> None:
         """处理服务端请求会话完整内容。"""

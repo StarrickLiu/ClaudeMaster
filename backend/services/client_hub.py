@@ -481,7 +481,7 @@ class ClientHub:
 
         evt_type = event.get("type")
 
-        if evt_type != "stream_event":
+        if evt_type not in ("stream_event", "session_heartbeat"):
             logger.info(
                 "[REMOTE EVT] agent=%s session=%s type=%s subtype=%s",
                 rs.agent_id[:8], rs.initial_id[:8], evt_type, event.get("subtype"),
@@ -501,6 +501,11 @@ class ClientHub:
                 rs.session_id = real_id
                 self._sessions[real_id] = rs
             rs.state = "idle"
+
+        # 会话级心跳：直接转发给前端，不改变状态机
+        if evt_type == "session_heartbeat":
+            await rs._notify(event)
+            return
 
         # 状态更新逻辑（与 ClaudeBroker 对齐）
         if evt_type == "stream_event":
@@ -558,6 +563,29 @@ class ClientHub:
         except Exception as e:
             logger.error("发送到 agent 失败: %s", e)
             raise ValueError(f"发送到 agent 失败: {e}")
+
+    async def kill_agent_processes(self, agent_id: str, pids: list[int]) -> dict[str, Any]:
+        """向 agent 发送 kill_processes 命令并等待结果。"""
+        agent = self._agents.get(agent_id)
+        if not agent or not agent.ws:
+            raise ValueError(f"agent {agent_id} 未连接")
+
+        request_id = uuid.uuid4().hex
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        self._pending_requests[request_id] = fut
+
+        await agent.ws.send_json({
+            "type": "kill_processes",
+            "request_id": request_id,
+            "pids": pids,
+        })
+
+        try:
+            result = await asyncio.wait_for(fut, timeout=10)
+            return result
+        except asyncio.TimeoutError:
+            self._pending_requests.pop(request_id, None)
+            raise ValueError("agent 响应超时")
 
     async def stop_remote_session(self, rs: RemoteSession) -> None:
         """停止远程会话。"""

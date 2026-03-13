@@ -28,6 +28,14 @@ export interface ToolActivity {
   timestamp: number;
 }
 
+/** 会话心跳信息（远程 agent 专用） */
+export interface HeartbeatInfo {
+  /** 最后一次收到心跳的本地时间戳（ms） */
+  lastTs: number;
+  /** 是否超时（超过 10 秒未收到心跳） */
+  stale: boolean;
+}
+
 export interface ChatEventMap {
   "state-change": ChatState;
   "text-delta": string;
@@ -41,6 +49,7 @@ export interface ChatEventMap {
   "status": string | null;
   "error": string;
   "closed": void;
+  "heartbeat": HeartbeatInfo;
 }
 
 type Listener<T> = (data: T) => void;
@@ -55,6 +64,10 @@ export class ChatClient {
   private _activeToolBlocks = new Map<number, { name: string; partialJson: string }>();
   /** starting 状态超时计时器：8s 后自动升级为 idle */
   private _startingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 会话心跳追踪 */
+  private _lastHeartbeat = 0;
+  private _heartbeatChecker: ReturnType<typeof setInterval> | null = null;
+  private _heartbeatStale = false;
 
   get state(): ChatState {
     return this._state;
@@ -77,6 +90,8 @@ export class ChatClient {
       this._setState("connected");
       // 发送缓冲的消息
       this._flushPending();
+      // 启动心跳检测定时器
+      this._startHeartbeatChecker();
     };
 
     this.ws.onmessage = (ev) => {
@@ -149,6 +164,7 @@ export class ChatClient {
       clearTimeout(this._startingTimer);
       this._startingTimer = null;
     }
+    this._stopHeartbeatChecker();
     this.ws?.close();
     this.ws = null;
     this._pending = [];
@@ -335,9 +351,41 @@ export class ChatClient {
         }
         break;
 
+      case "session_heartbeat":
+        this._lastHeartbeat = Date.now();
+        if (this._heartbeatStale) {
+          this._heartbeatStale = false;
+          this.emit("heartbeat", { lastTs: this._lastHeartbeat, stale: false });
+        }
+        break;
+
       case "error":
         this.emit("error", (event["message"] as string) || "未知错误");
         break;
     }
+  }
+
+  private _startHeartbeatChecker(): void {
+    this._stopHeartbeatChecker();
+    this._lastHeartbeat = 0;
+    this._heartbeatStale = false;
+    this._heartbeatChecker = setInterval(() => {
+      if (!this._lastHeartbeat) return; // 还没收到过心跳（可能是本地会话）
+      const elapsed = Date.now() - this._lastHeartbeat;
+      const stale = elapsed > 10_000;
+      if (stale !== this._heartbeatStale) {
+        this._heartbeatStale = stale;
+        this.emit("heartbeat", { lastTs: this._lastHeartbeat, stale });
+      }
+    }, 3_000);
+  }
+
+  private _stopHeartbeatChecker(): void {
+    if (this._heartbeatChecker) {
+      clearInterval(this._heartbeatChecker);
+      this._heartbeatChecker = null;
+    }
+    this._lastHeartbeat = 0;
+    this._heartbeatStale = false;
   }
 }

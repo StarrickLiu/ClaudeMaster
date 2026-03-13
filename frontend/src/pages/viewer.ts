@@ -73,6 +73,8 @@ export class ViewerPage extends LitElement {
   @state() toolActivities: ToolActivity[] = [];
   @state() private _promptTooLong = false;
   @state() private _compacting = false;
+  @state() private _heartbeatStale = false;
+  @state() private _streamingSince = 0;
 
   private chatClient: ChatClient | null = null;
   /** 本次会话中用户选择"始终允许"的工具集合，自动通过同名工具请求 */
@@ -540,6 +542,10 @@ export class ViewerPage extends LitElement {
         if (activeBroker.claude_session_id) {
           this.brokerSessionId = activeBroker.claude_session_id;
         }
+        // 从 broker 会话自动识别远程 agentId（URL 没有 ?agent= 时也能正确识别）
+        if (!this._agentId && activeBroker.source === "remote" && activeBroker.agent_id) {
+          this._agentId = activeBroker.agent_id;
+        }
       }
 
       // 用最佳 ID 加载 JSONL（brokerSessionId > URL sessionId）
@@ -654,7 +660,7 @@ export class ViewerPage extends LitElement {
   }
 
   private async _loadDiff() {
-    if (!this.data) return;
+    if (!this.data || this._agentId) return;
     const projectPath = this.data.summary.project_path;
     this.diffLoading = true;
     this.commitsLoading = true;
@@ -736,7 +742,10 @@ export class ViewerPage extends LitElement {
           maxTurns: config.maxTurns ?? undefined,
           appendSystemPrompt: config.appendSystemPrompt || undefined,
           addDirs: config.addDirs.length > 0 ? config.addDirs : undefined,
-        } : undefined
+          agentId: this._agentId || undefined,
+        } : {
+          agentId: this._agentId || undefined,
+        }
       );
       // 优先用真实 Claude session_id（与 JSONL 一致），否则用 initial_id
       this.brokerSessionId = result.claude_session_id || result.session_id;
@@ -766,6 +775,16 @@ export class ViewerPage extends LitElement {
       if (s === "streaming" && this.pendingPermission) {
         this.pendingPermission = null;
       }
+      // 记录 streaming 开始时间（用于显示等待时长）
+      if (s === "streaming" || s === "starting") {
+        if (!this._streamingSince) this._streamingSince = Date.now();
+      } else {
+        this._streamingSince = 0;
+      }
+    });
+
+    c.on("heartbeat", (info) => {
+      this._heartbeatStale = info.stale;
     });
 
     c.on("text-delta", (text) => {
@@ -1338,22 +1357,24 @@ export class ViewerPage extends LitElement {
         @rename=${this._onRename}
       ></cm-session-header>
 
-      <div class="tabs">
-        <button
-          class="tab"
-          ?data-active=${this.activeTab === "conversation"}
-          @click=${() => this._switchTab("conversation")}
-        >
-          对话
-        </button>
-        <button
-          class="tab"
-          ?data-active=${this.activeTab === "diff"}
-          @click=${() => this._switchTab("diff")}
-        >
-          代码变更
-        </button>
-      </div>
+      ${this._agentId ? nothing : html`
+        <div class="tabs">
+          <button
+            class="tab"
+            ?data-active=${this.activeTab === "conversation"}
+            @click=${() => this._switchTab("conversation")}
+          >
+            对话
+          </button>
+          <button
+            class="tab"
+            ?data-active=${this.activeTab === "diff"}
+            @click=${() => this._switchTab("diff")}
+          >
+            代码变更
+          </button>
+        </div>
+      `}
 
       ${this.activeTab === "conversation"
         ? html`
@@ -1363,6 +1384,8 @@ export class ViewerPage extends LitElement {
             ${this.chatMode
               ? html`<cm-chat-input
                   .chatState=${this.chatState}
+                  .heartbeatStale=${this._heartbeatStale}
+                  .streamingSince=${this._streamingSince}
                   @send-message=${this._onSendMessage}
                   @interrupt=${this._onInterrupt}
                 ></cm-chat-input>`

@@ -367,4 +367,7 @@ export const api = {
 
   updateAgent: (agentId: string, update: { display_name?: string }) =>
     requestPatch<{ agent_id: string; display_name: string }>(`/api/agents/${agentId}`, update),
+
+  killAgentProcesses: (agentId: string, pids: number[]) =>
+    requestPost<{ killed: number[]; failed: number[] }>(`/api/agents/${agentId}/kill-processes`, { pids }),
 };

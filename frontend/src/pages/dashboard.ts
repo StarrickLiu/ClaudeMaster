@@ -451,6 +451,15 @@ export class DashboardPage extends LitElement {
     location.hash = `#/viewer/${encoded}/${sessionId}${suffix}`;
   }
 
+  private async _killRemoteProcesses(agentId: string, pids: number[]) {
+    try {
+      await api.killAgentProcesses(agentId, pids);
+      await this._fetchAll();
+    } catch (err) {
+      console.error("清理进程失败:", err);
+    }
+  }
+
   private async _stopSession(sessionId: string) {
     try {
       await api.stopChat(sessionId);
@@ -481,7 +490,7 @@ export class DashboardPage extends LitElement {
       sessionStorage.setItem(`cm_new_session:${result.session_id}`, result.project_path);
       sessionStorage.setItem(`cm_new_session_name:${result.session_id}`, result.name);
       sessionStorage.setItem(`cm_new_session_autoattach:${result.session_id}`, "1");
-      this._navToSession(result.session_id, result.project_path);
+      this._navToSession(result.session_id, result.project_path, agentId || undefined);
     } catch (err) {
       console.error("新建会话失败:", err);
       this._newSessionError = err instanceof Error ? err.message : "启动失败，请检查日志";
@@ -530,23 +539,46 @@ export class DashboardPage extends LitElement {
       .filter(p => !brokerPaths.has(p.cwd))
       .filter((p, i, arr) => arr.findIndex(q => q.cwd === p.cwd) === i);
 
-    // ── 远程非托管进程 + 会话匹配 ──
-    const remoteStandbyProcesses: { agent: AgentInfo; process: RemoteProcess; session: SessionSummary | null }[] = [];
+    // ── 远程非托管进程（按 agent+cwd 分组合并） ──
+    interface RemoteProcessGroup {
+      agent: AgentInfo;
+      cwd: string;
+      projectName: string;
+      pids: number[];
+      session: SessionSummary | null;
+      totalUptime: number;
+    }
+    const remoteStandbyGroups: RemoteProcessGroup[] = [];
     for (const agent of this.agents) {
       if (agent.state !== "connected") continue;
       const procs = this.agentProcesses.get(agent.agent_id) || [];
       const sessions = this.agentSessions.get(agent.agent_id) || [];
-      // 按 project_path 索引远程会话
       const sessionByPath = new Map<string, SessionSummary>();
       for (const s of sessions) {
         sessionByPath.set(s.project_path, s);
       }
+      // 按 cwd 分组
+      const cwdMap = new Map<string, RemoteProcessGroup>();
       for (const p of procs) {
         if (!p.managed && (p.cwd || p.project_name)) {
-          const matched = sessionByPath.get(p.cwd) || null;
-          remoteStandbyProcesses.push({ agent, process: p, session: matched });
+          const key = p.cwd || p.project_name || "";
+          let group = cwdMap.get(key);
+          if (!group) {
+            group = {
+              agent,
+              cwd: p.cwd,
+              projectName: p.project_name || "",
+              pids: [],
+              session: sessionByPath.get(p.cwd) || null,
+              totalUptime: 0,
+            };
+            cwdMap.set(key, group);
+          }
+          group.pids.push(p.pid);
+          group.totalUptime = Math.max(group.totalUptime, p.uptime_seconds);
         }
       }
+      remoteStandbyGroups.push(...cwdMap.values());
     }
 
     // ── legacy 进程按 24h 分流 ──
@@ -616,7 +648,7 @@ export class DashboardPage extends LitElement {
 
     // ── 待命中总数 ──
     const standbyCount = idleSessions.length + legacyStandby.length
-      + remoteStandbyProcesses.length;
+      + remoteStandbyGroups.length;
 
     // ── 是否显示机器 badge（>= 2 个 agent 时显示） ──
     const showMachineBadge = this.agents.length >= 2;
@@ -787,25 +819,37 @@ export class DashboardPage extends LitElement {
               if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""}></cm-session-card>`;
               return html`<cm-process-card .data=${p}></cm-process-card>`;
             })}
-            ${remoteStandbyProcesses.map(({ agent, process: p, session }) => {
-              const machine = showMachineBadge ? (agentNameMap.get(agent.agent_id) || agent.hostname) : "";
-              if (session) {
-                // 有匹配的远程 JSONL 会话，渲染为 session-card，点击时带 agentId
+            ${remoteStandbyGroups.map((group) => {
+              const machine = showMachineBadge ? (agentNameMap.get(group.agent.agent_id) || group.agent.hostname) : "";
+              if (group.session && group.pids.length === 1) {
+                // 单个进程有匹配 JSONL 会话 → session-card
                 return html`<cm-session-card
-                  .data=${{ ...session, is_active: true }}
+                  .data=${{ ...group.session, is_active: true }}
                   .brokerName=${machine}
-                  @click=${(e: Event) => { e.preventDefault(); this._navToSession(session.session_id, session.project_path, agent.agent_id); }}
+                  @click=${(e: Event) => { e.preventDefault(); this._navToSession(group.session!.session_id, group.session!.project_path, group.agent.agent_id); }}
                 ></cm-session-card>`;
               }
-              const asProcess = {
-                pid: p.pid,
-                cwd: p.cwd || "",
-                uptime_seconds: p.uptime_seconds,
-                project_name: p.project_name,
-                session_id: null,
-                git_branch: null,
-              };
-              return html`<cm-process-card .data=${asProcess} .machineName=${machine}></cm-process-card>`;
+              // 多进程或无会话 → 合并卡片
+              const projectName = group.projectName || group.cwd.split("/").pop() || group.cwd;
+              return html`
+                <div class="pending-card" style="border-color: var(--color-standby)">
+                  <div class="pending-card-header">
+                    <span class="pending-badge" style="background:var(--color-standby-bg);color:var(--color-standby)">待命中</span>
+                    ${machine ? html`<span class="remote-badge">${machine}</span>` : nothing}
+                    <span class="pending-project">${projectName}</span>
+                    ${group.pids.length > 1 ? html`<span class="count">${group.pids.length} 个孤儿进程</span>` : nothing}
+                    <button
+                      class="stop-btn"
+                      title="清理${group.pids.length > 1 ? `这 ${group.pids.length} 个` : "此"}孤儿进程"
+                      @click=${(e: Event) => {
+                        e.stopPropagation();
+                        this._killRemoteProcesses(group.agent.agent_id, group.pids);
+                      }}
+                    >清理</button>
+                  </div>
+                  <div class="pending-hint">${group.cwd} · 运行 ${this._formatUptime(Math.round(group.totalUptime))}</div>
+                </div>
+              `;
             })}
           </div>
         </div>
