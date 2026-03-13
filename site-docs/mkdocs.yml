@@ -1,6 +1,8 @@
 site_name: ClaudeMaster
 site_description: Claude Code Web 管理平台 — 监控、管理、交互
-site_url: ""
+site_url: https://starrickliu.github.io/ClaudeMaster/
+repo_url: https://github.com/StarrickLiu/ClaudeMaster
+repo_name: StarrickLiu/ClaudeMaster
 
 theme:
   name: material
