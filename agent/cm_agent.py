@@ -659,7 +659,7 @@ class CmAgent:
 
         if msg_type == "ping":
             # 服务端心跳探测，原样回复 pong
-            await self._send({"type": "pong", "ts": msg.get("ts", 0)})
+            await self.ws.send(json.dumps({"type": "pong", "ts": msg.get("ts", 0)}))
 
         elif msg_type == "start_session":
             # daemon 模式：服务端请求启动新会话
