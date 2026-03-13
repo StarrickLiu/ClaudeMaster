@@ -436,7 +436,7 @@ class ClientHub:
         self._pending_requests[request_id] = future
 
         try:
-            await agent.ws.send(json.dumps({
+            await agent.ws.send_text(json.dumps({
                 "type": "get_session_detail",
                 "request_id": request_id,
                 "session_id": session_id,
