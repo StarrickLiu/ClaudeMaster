@@ -10,6 +10,7 @@ from typing import Any
 from config import PROJECTS_DIR
 from models.message import ContentBlock, Message, TokenUsage
 from models.session import SessionDetail, SessionSummary, SubagentInfo
+from services.session_name_store import ensure_name
 
 # 不进入对话视图的消息类型
 SKIP_TYPES = frozenset({
@@ -334,6 +335,7 @@ async def get_all_sessions(
                 # 从第一条消息里提取内部 sessionId（用于 claude --resume）
                 resume_id = _extract_resume_session_id(jsonl_file)
                 summary = _build_summary(session_id, project_path, project_name, raw, resume_session_id=resume_id)
+                summary.name = ensure_name(session_id)
                 _summary_cache[session_id] = (mtime, summary)
                 summaries.append(summary)
 
@@ -362,6 +364,7 @@ async def get_session_detail(session_id: str, project_encoded: str) -> SessionDe
         project_path, project_name = _get_project_info(project_encoded)
         resume_id = _extract_resume_session_id(path)
         summary = _build_summary(session_id, project_path, project_name, raw, resume_session_id=resume_id)
+        summary.name = ensure_name(session_id)
 
         return SessionDetail(summary=summary, messages=messages)
 

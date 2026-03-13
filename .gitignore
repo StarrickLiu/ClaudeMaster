@@ -29,3 +29,22 @@ Thumbs.db
 .coverage
 htmlcov/
 .pytest_cache/
+
+# Logs
+logs/
+
+# MkDocs
+site-docs/site/
+
+# 证书和密钥
+certs/
+*.pem
+*.key
+*.crt
+
+# Claude Code 项目配置（个人本地使用）
+CLAUDE.md
+.claude/
+
+# 内部开发日志
+docs/DEVELOPMENT.md

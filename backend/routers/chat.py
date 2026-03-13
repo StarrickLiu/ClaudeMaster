@@ -1,4 +1,4 @@
-# 交互式会话管理 API：启动、列表、停止
+# 交互式会话管理 API：启动、列表、停止（支持本地和远程会话）
 from __future__ import annotations
 
 from typing import Any
@@ -7,8 +7,18 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from services.claude_broker import broker
+from services.session_registry import SessionRegistry
 
 router = APIRouter(tags=["交互"])
+
+# 模块级引用，在 main.py 中注入
+_registry: SessionRegistry | None = None
+
+
+def init_chat_router(registry: SessionRegistry) -> None:
+    """由 main.py 调用，注入 SessionRegistry 实例。"""
+    global _registry
+    _registry = registry
 
 
 class StartChatRequest(BaseModel):
@@ -36,6 +46,9 @@ class ChatSessionInfo(BaseModel):
     launch_config: dict[str, Any] = {}
     claude_session_id: str | None = None  # 真实 Claude session_id（与 JSONL 一致）
     pending_tool: str | None = None   # 待审批工具名（仅 waiting_permission 状态）
+    source: str | None = None  # "local" | "remote"，None 表示本地（向后兼容）
+    hostname: str | None = None  # 远程会话的主机名
+    client_id: str | None = None  # 远程会话的 client_id
 
 
 @router.post(
@@ -69,17 +82,20 @@ async def start_chat(req: StartChatRequest) -> ChatSessionInfo:
         name=cs.name,
         launch_config=cs.launch_config,
         claude_session_id=real_id,
+        source="local",
     )
 
 
 @router.get(
     "/chat/sessions",
     summary="列出活跃交互会话",
-    description="返回当前由 ClaudeMaster 管理的所有 Claude Code 子进程。",
+    description="返回当前由 ClaudeMaster 管理的所有会话（包括本地子进程和远程 agent）。",
     response_model=list[ChatSessionInfo],
 )
 async def list_chat_sessions() -> list[ChatSessionInfo]:
-    return [ChatSessionInfo(**s) for s in broker.list_sessions()]
+    if _registry is None:
+        raise RuntimeError("SessionRegistry 未初始化")
+    return [ChatSessionInfo(**s) for s in _registry.list_all_sessions()]
 
 
 class UpdateChatRequest(BaseModel):
@@ -95,12 +111,18 @@ class UpdateChatRequest(BaseModel):
     response_model=ChatSessionInfo,
 )
 async def update_chat(session_id: str, req: UpdateChatRequest) -> ChatSessionInfo:
-    cs = broker.get_session(session_id)
+    if _registry is None:
+        raise RuntimeError("SessionRegistry 未初始化")
+    cs = _registry.get_session(session_id)
     if not cs:
         raise HTTPException(status_code=404, detail=f"会话 {session_id} 不存在")
     if req.name is not None:
         cs.name = req.name.strip()
     real_id = cs.session_id if cs.session_id != cs.initial_id else None
+
+    from services.client_hub import RemoteSession
+    is_remote = isinstance(cs, RemoteSession)
+
     return ChatSessionInfo(
         session_id=cs.initial_id or cs.session_id,
         project_path=cs.project_path,
@@ -108,6 +130,9 @@ async def update_chat(session_id: str, req: UpdateChatRequest) -> ChatSessionInf
         name=cs.name,
         launch_config=cs.launch_config,
         claude_session_id=real_id,
+        source="remote" if is_remote else "local",
+        hostname=cs.hostname if is_remote else None,
+        client_id=cs.client_id if is_remote else None,
     )
 
 
@@ -117,8 +142,10 @@ async def update_chat(session_id: str, req: UpdateChatRequest) -> ChatSessionInf
     description="终止指定的 Claude Code 子进程。",
 )
 async def stop_chat(session_id: str) -> dict[str, bool]:
+    if _registry is None:
+        raise RuntimeError("SessionRegistry 未初始化")
     try:
-        await broker.stop_session(session_id)
+        await _registry.stop_session(session_id)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     return {"success": True}

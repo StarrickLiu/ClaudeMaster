@@ -1,8 +1,10 @@
 # 会话相关 API
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from models.message import Message
 from models.session import SessionDetail, SessionSummary, SubagentInfo
+from services.session_name_store import set_name
 from services.session_store import (
     get_all_sessions,
     get_session_detail,
@@ -87,3 +89,17 @@ async def get_subagent(
     if messages is None:
         raise HTTPException(status_code=404, detail="子代理不存在")
     return {"agent_id": agent_id, "messages": messages}
+
+
+class UpdateSessionNameRequest(BaseModel):
+    name: str
+
+
+@router.patch(
+    "/sessions/{session_id}/name",
+    summary="更新会话名称",
+    description="设置或更新会话的自定义名称。",
+)
+async def update_session_name(session_id: str, req: UpdateSessionNameRequest) -> dict:
+    set_name(session_id, req.name.strip())
+    return {"session_id": session_id, "name": req.name.strip()}

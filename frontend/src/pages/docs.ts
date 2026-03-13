@@ -197,6 +197,8 @@ export class DocsPage extends LitElement {
       color: var(--color-text);
       line-height: 1.75;
       font-size: var(--font-size-base);
+      min-width: 0;
+      overflow-wrap: break-word;
     }
 
     .doc-content h1 {
@@ -244,6 +246,7 @@ export class DocsPage extends LitElement {
       background: var(--color-border-light);
       padding: 2px 6px;
       border-radius: 4px;
+      word-break: break-word;
     }
 
     .doc-content pre {
@@ -255,6 +258,8 @@ export class DocsPage extends LitElement {
       font-size: var(--font-size-sm);
       line-height: 1.6;
       margin: var(--space-md) 0;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .doc-content pre code {
@@ -269,6 +274,8 @@ export class DocsPage extends LitElement {
       border-collapse: collapse;
       margin: var(--space-md) 0;
       font-size: var(--font-size-sm);
+      display: block;
+      overflow-x: auto;
     }
 
     .doc-content th,

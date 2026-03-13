@@ -23,6 +23,7 @@ class SessionSummary(BaseModel):
     is_active: bool = False
     total_input_tokens: int = 0
     total_output_tokens: int = 0
+    name: str = ""
 
 
 class SessionDetail(BaseModel):

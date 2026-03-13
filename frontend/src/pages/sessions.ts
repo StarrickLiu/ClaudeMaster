@@ -1,6 +1,7 @@
 // 会话历史浏览页面
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { api } from "../api.js";
 import type { Project, SessionSummary, SearchResult } from "../api.js";
 import { router } from "../router.js";
@@ -478,7 +479,7 @@ export class SessionsPage extends LitElement {
                   ${r.snippets.length > 0 ? html`
                     <div class="snippet-list">
                       ${r.snippets.map(s => html`
-                        <div class="snippet" .innerHTML=${this._highlightSnippet(s)}></div>
+                        <div class="snippet">${unsafeHTML(this._highlightSnippet(s))}</div>
                       `)}
                     </div>
                   ` : nothing}

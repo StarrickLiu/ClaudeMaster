@@ -39,6 +39,10 @@ pre, code {
   font-family: var(--font-mono);
 }
 
+pre {
+  overflow-wrap: break-word;
+}
+
 img {
   max-width: 100%;
 }

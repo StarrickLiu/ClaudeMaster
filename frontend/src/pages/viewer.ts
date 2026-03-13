@@ -24,6 +24,20 @@ import "../components/session-summary.js";
 /** 每次加载的原始消息数（含 tool_result 等隐藏消息） */
 const BATCH_SIZE = 30;
 
+/** 生成 UUID，兼容非安全上下文（纯 HTTP） */
+function generateUUID(): string {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+  // 回退：用 crypto.getRandomValues 手动拼接
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  buf[6] = (buf[6] & 0x0f) | 0x40;
+  buf[8] = (buf[8] & 0x3f) | 0x80;
+  const hex = [...buf].map(b => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 @customElement("cm-viewer")
 export class ViewerPage extends LitElement {
   @property() sessionId = "";
@@ -55,6 +69,8 @@ export class ViewerPage extends LitElement {
   @state() pendingPermission: PermissionRequest | null = null;
   @state() sessionStats: ResultStats | null = null;
   @state() toolActivities: ToolActivity[] = [];
+  @state() private _promptTooLong = false;
+  @state() private _compacting = false;
 
   private chatClient: ChatClient | null = null;
   /** 本次会话中用户选择"始终允许"的工具集合，自动通过同名工具请求 */
@@ -212,6 +228,7 @@ export class ViewerPage extends LitElement {
       text-overflow: ellipsis;
       white-space: nowrap;
       flex: 1;
+      min-width: 0;
     }
 
     .activity-ts {
@@ -414,6 +431,55 @@ export class ViewerPage extends LitElement {
       to { transform: rotate(360deg); }
     }
 
+    .compacting-notice {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: var(--space-sm);
+      padding: var(--space-md);
+      margin: var(--space-md) 0;
+      background: rgba(99, 102, 241, 0.06);
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      border-radius: var(--radius-sm);
+      font-size: var(--font-size-sm);
+      color: var(--color-primary);
+    }
+
+    .prompt-too-long {
+      margin: var(--space-md) 0;
+      padding: var(--space-md);
+      background: rgba(239, 68, 68, 0.08);
+      border: 1px solid rgba(239, 68, 68, 0.3);
+      border-radius: var(--radius-sm);
+      text-align: center;
+    }
+
+    .prompt-too-long-title {
+      font-weight: 600;
+      color: var(--color-error, #ef4444);
+      margin-bottom: var(--space-xs);
+    }
+
+    .prompt-too-long-desc {
+      font-size: var(--font-size-sm);
+      color: var(--color-text-secondary);
+      margin-bottom: var(--space-md);
+    }
+
+    .compact-btn {
+      padding: var(--space-sm) var(--space-lg);
+      background: var(--color-primary);
+      color: white;
+      border: none;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      font-size: var(--font-size-sm);
+    }
+
+    .compact-btn:hover {
+      background: var(--color-primary-hover);
+    }
+
     @media (max-width: 768px) {
       .scroll-bottom {
         bottom: 110px;
@@ -476,6 +542,9 @@ export class ViewerPage extends LitElement {
       if (session) {
         this.data = session;
         this._buildToolResultMap();
+        if (!this._sessionName && session.summary.name) {
+          this._sessionName = session.summary.name;
+        }
       }
 
       if (activeBroker && !this.data) {
@@ -636,6 +705,7 @@ export class ViewerPage extends LitElement {
     }
     this.pendingPermission = null;
     this.toolActivities = [];
+    this._promptTooLong = false;
 
     // resumeId：
     // - broker 已有进程时 → attach 到已有进程（avoid 重复启动）
@@ -734,9 +804,21 @@ export class ViewerPage extends LitElement {
       }
     });
 
-    c.on("result", async () => {
+    c.on("status", (status) => {
+      this._compacting = status === "compacting";
+    });
+
+    c.on("result", async (evt) => {
       this.pendingPermission = null;
       this.toolActivities = [];
+
+      // 检测 "Prompt is too long" 错误
+      const isError = !!(evt as Record<string, unknown>)["is_error"];
+      const resultText = String((evt as Record<string, unknown>)["result"] ?? "");
+      if (isError && resultText.includes("Prompt is too long") || this.streamingText.includes("Prompt is too long")) {
+        this._promptTooLong = true;
+      }
+
       // 保存流式内容，防止 _reload 失败后消息丢失
       const pendingText = this.streamingText;
       // 等 JSONL 写入后再刷新，刷新完成后再清除流式文字，避免"空窗期"
@@ -749,7 +831,7 @@ export class ViewerPage extends LitElement {
           this.data = {
             ...this.data,
             messages: [...this.data.messages, {
-              uuid: crypto.randomUUID(),
+              uuid: generateUUID(),
               parent_uuid: null,
               type: "assistant",
               timestamp: new Date().toISOString(),
@@ -825,15 +907,9 @@ export class ViewerPage extends LitElement {
   private async _onSendMessage(e: CustomEvent<string>) {
     const text = e.detail;
 
-    // 会话已断开（进程退出）时自动重连
-    if (!this.chatClient || this.chatState === "closed") {
-      await this._startChat();
-    }
-    if (!this.chatClient) return;
-    this.chatClient.sendMessage(text);
-    // 乐观展示用户消息
+    // 先乐观展示用户消息（不等待重连），确保立即可见
     const userMsg: Message = {
-      uuid: crypto.randomUUID(),
+      uuid: generateUUID(),
       parent_uuid: null,
       type: "user",
       timestamp: new Date().toISOString(),
@@ -874,12 +950,28 @@ export class ViewerPage extends LitElement {
           is_active: true,
           total_input_tokens: 0,
           total_output_tokens: 0,
+          name: this._sessionName,
         },
         messages: [userMsg],
       };
     }
-    this.requestUpdate();
-    requestAnimationFrame(() => this._scrollToBottom());
+    // 等待 DOM 更新后再滚动，确保消息已渲染
+    this.updateComplete.then(() => this._scrollToBottom());
+
+    // 会话已断开（进程退出）时自动重连
+    if (!this.chatClient || this.chatState === "closed") {
+      try {
+        await this._startChat();
+      } catch (err) {
+        console.error("重连失败:", err);
+      }
+    }
+    if (!this.chatClient) return;
+    this.chatClient.sendMessage(text);
+  }
+
+  private _onDismissPromptTooLong() {
+    this._promptTooLong = false;
   }
 
   private _onInterrupt() {
@@ -902,6 +994,9 @@ export class ViewerPage extends LitElement {
         console.error("重命名失败:", err);
       }
     }
+    // 双写：同步更新通用 name store（基于 JSONL session_id）
+    const jsonlId = this._resolveSessionId();
+    try { await api.updateSessionName(jsonlId, e.detail); } catch { /* 静默 */ }
   }
 
   private _onApprove(e: CustomEvent<{ requestId: string; input: Record<string, unknown>; always?: boolean; toolName?: string }>) {
@@ -1058,6 +1153,19 @@ export class ViewerPage extends LitElement {
               ?streaming=${true}
             ></cm-message-bubble>`
           : nothing}
+        ${this._compacting
+          ? html`<div class="compacting-notice">
+              <span class="welcome-spinner"></span>
+              正在压缩对话历史...
+            </div>`
+          : nothing}
+        ${this._promptTooLong
+          ? html`<div class="prompt-too-long">
+              <div class="prompt-too-long-title">上下文过长</div>
+              <div class="prompt-too-long-desc">对话历史超出模型上下文限制，自动压缩也无法处理。请在工作台新建会话继续。</div>
+              <button class="compact-btn" @click=${this._onDismissPromptTooLong}>知道了</button>
+            </div>`
+          : nothing}
       </div>
 
       <div class="token-stats">
@@ -1210,6 +1318,8 @@ export class ViewerPage extends LitElement {
         .chatConnecting=${this.chatConnecting}
         .hasActiveBroker=${!!this._activeBrokerSession}
         .launchConfig=${this._activeBrokerSession?.launch_config ?? null}
+        .source=${this._activeBrokerSession?.source ?? "local"}
+        .hostname=${this._activeBrokerSession?.hostname ?? ""}
         @resume=${this._startChat}
         @attach=${this._onAttach}
         @disconnect=${this._disconnectChat}

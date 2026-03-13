@@ -38,7 +38,7 @@ ClaudeMaster 不仅能查看历史对话，还能从浏览器直接与 Claude Co
    - **修改参数后 Allow** — 调整输入参数后批准
 4. 响应通过 WebSocket 发回 broker，broker 写入 stdin
 
-> **注意**：在 `bypassPermissions` 模式下，Claude Code 会自动批准工具使用，但仍会发送 `control_request` 事件。Broker 会在检测到后续 `stream_event` 时自动清除待审批状态。
+> **注意**：在 `stream-json` 模式下，Claude Code 即使在 `bypassPermissions` 模式下也会发送 `control_request` 事件并等待 `control_response`。Broker 检测到 `bypassPermissions` 模式时会自动回复 `allow`，不转发给前端。
 
 ## 恢复会话
 

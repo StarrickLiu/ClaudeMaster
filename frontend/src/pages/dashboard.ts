@@ -50,7 +50,7 @@ export class DashboardPage extends LitElement {
     .card-grid {
       display: grid;
       gap: var(--space-md);
-      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
     }
 
     .status-dot {
@@ -199,6 +199,25 @@ export class DashboardPage extends LitElement {
       font-size: var(--font-size-xs);
       color: var(--color-text-muted);
       margin-top: var(--space-xs);
+    }
+
+    .remote-badge {
+      background: var(--color-primary-bg, #dbeafe);
+      color: var(--color-primary, #2563eb);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      white-space: nowrap;
+    }
+
+    .disconnected-badge {
+      background: var(--color-error-bg, #fee2e2);
+      color: var(--color-error, #dc2626);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
     }
 
     .stop-btn {
@@ -379,7 +398,7 @@ export class DashboardPage extends LitElement {
     // broker 会话分类
     const pendingChatSessions  = this.chatSessions.filter(s => s.state === "waiting_permission");
     const streamingSessions    = this.chatSessions.filter(s => s.state === "streaming" || s.state === "starting");
-    const idleSessions         = this.chatSessions.filter(s => s.state === "idle");
+    const idleSessions         = this.chatSessions.filter(s => s.state === "idle" || s.state === "disconnected");
     const activeChatSessions   = [...streamingSessions, ...idleSessions]; // 用于排除最近会话
 
     // JSONL 会话分类
@@ -407,14 +426,24 @@ export class DashboardPage extends LitElement {
         .filter((id): id is string => id !== undefined)
     );
 
-    // 最近会话：排除已显示在工作中/待命中/待审批的会话，且强制 is_active=false
-    // （活跃会话已在对应区块展示，历史会话不应显示"运行中"徽章）
-    const recentSessions = this.sessions
-      .filter(
-        s => !legacyMatchedIds.has(s.session_id)
-          && !activeBrokerIds.has(s.session_id)
-          && !pendingBrokerIds.has(s.session_id)
-      )
+    // 未被 broker 或 legacy 进程占用的会话，按 24h 拆分
+    const now = Date.now();
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+
+    const unclaimed = this.sessions.filter(
+      s => !legacyMatchedIds.has(s.session_id)
+        && !activeBrokerIds.has(s.session_id)
+        && !pendingBrokerIds.has(s.session_id)
+    );
+
+    // 24h 内结束的会话 → 待命中
+    const standbyTimeSessions = unclaimed
+      .filter(s => s.end_time && (now - new Date(s.end_time).getTime()) < TWENTY_FOUR_HOURS)
+      .map(s => ({ ...s, is_active: false }));
+
+    // 超过 24h 或无结束时间 → 最近会话
+    const recentSessions = unclaimed
+      .filter(s => !s.end_time || (now - new Date(s.end_time).getTime()) >= TWENTY_FOUR_HOURS)
       .map(s => ({ ...s, is_active: false }));
 
     const hasRefreshBtn = pendingChatSessions.length === 0 && streamingSessions.length === 0 && legacyProcesses.length === 0;
@@ -479,6 +508,7 @@ export class DashboardPage extends LitElement {
                 >
                   <div class="pending-card-header">
                     <span class="pending-badge">待审批</span>
+                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
                     ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
                     <span class="pending-project" title=${cs.project_path}>${projectName}</span>
                   </div>
@@ -505,7 +535,7 @@ export class DashboardPage extends LitElement {
           <div class="card-grid">
             ${streamingSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || ""}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
               return html`
                 <div
@@ -517,6 +547,7 @@ export class DashboardPage extends LitElement {
                 >
                   <div class="pending-card-header">
                     <span class="pending-badge" style="background:var(--color-working-bg);color:var(--color-working)">工作中</span>
+                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
                     ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
                     <span class="pending-project">${projectName}</span>
                   </div>
@@ -527,19 +558,19 @@ export class DashboardPage extends LitElement {
         </div>
       ` : nothing}
 
-      <!-- 待命中：broker idle 会话 + legacy 进程（进程存活但空闲） -->
-      ${(idleSessions.length > 0 || legacyProcesses.length > 0) ? html`
+      <!-- 待命中：broker idle 会话 + legacy 进程 + 24h 内结束的会话 -->
+      ${(idleSessions.length > 0 || legacyProcesses.length > 0 || standbyTimeSessions.length > 0) ? html`
         <div class="section">
           <div class="section-title">
             <span class="status-dot dot-standby"></span>
             待命中
-            <span class="count">(${idleSessions.length + legacyProcesses.length})</span>
+            <span class="count">(${idleSessions.length + legacyProcesses.length + standbyTimeSessions.length})</span>
             <button class="refresh-btn" @click=${this._fetchAll.bind(this)}>刷新</button>
           </div>
           <div class="card-grid">
             ${idleSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${cs.name || ""}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
               return html`
                 <div
@@ -551,16 +582,20 @@ export class DashboardPage extends LitElement {
                 >
                   <div class="pending-card-header">
                     <span class="pending-badge" style="background:var(--color-standby-bg);color:var(--color-standby)">待命中</span>
+                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
+                    ${cs.state === "disconnected" ? html`<span class="disconnected-badge">${cs.source === "remote" ? "agent 断线，等待重连…" : "已断开"}</span>` : nothing}
                     ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
                     <span class="pending-project">${projectName}</span>
-                    <button
-                      class="stop-btn"
-                      title="停止此会话"
-                      @click=${(e: Event) => {
-                        e.stopPropagation();
-                        this._stopSession(cs.session_id);
-                      }}
-                    >✕</button>
+                    ${cs.source !== "remote" ? html`
+                      <button
+                        class="stop-btn"
+                        title="停止此会话"
+                        @click=${(e: Event) => {
+                          e.stopPropagation();
+                          this._stopSession(cs.session_id);
+                        }}
+                      >✕</button>
+                    ` : nothing}
                   </div>
                   <div class="pending-hint">${cs.project_path}</div>
                 </div>
@@ -568,9 +603,10 @@ export class DashboardPage extends LitElement {
             })}
             ${legacyProcesses.map(p => {
               const matched = this.sessions.find(s => s.project_path === p.cwd);
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""}></cm-session-card>`;
               return html`<cm-process-card .data=${p}></cm-process-card>`;
             })}
+            ${standbyTimeSessions.map(s => html`<cm-session-card .data=${s} .brokerName=${s.name || ""}></cm-session-card>`)}
           </div>
         </div>
       ` : nothing}
@@ -586,7 +622,7 @@ export class DashboardPage extends LitElement {
           ` : nothing}
         </div>
         ${recentSessions.length > 0
-          ? html`<div class="card-grid">${recentSessions.map(s => html`<cm-session-card .data=${s}></cm-session-card>`)}</div>`
+          ? html`<div class="card-grid">${recentSessions.map(s => html`<cm-session-card .data=${s} .brokerName=${s.name || ""}></cm-session-card>`)}</div>`
           : html`<div class="empty">暂无会话记录</div>`
         }
       </div>

@@ -106,6 +106,7 @@ export interface SessionSummary {
   is_active: boolean;
   total_input_tokens: number;
   total_output_tokens: number;
+  name: string;
 }
 
 export interface ContentBlock {
@@ -193,6 +194,12 @@ export interface ChatSessionInfo {
   /** 真实 Claude session_id（与 JSONL 一致），initial_id 不同时才有值 */
   claude_session_id: string | null;
   pending_tool: string | null;
+  /** 会话来源："local"（本地子进程）| "remote"（远程 agent）| null（旧版兼容） */
+  source: string | null;
+  /** 远程会话的主机名 */
+  hostname: string | null;
+  /** 远程会话的 client_id */
+  client_id: string | null;
 }
 
 export interface SearchResult {
@@ -314,4 +321,7 @@ export const api = {
 
   getQuota: () =>
     request<QuotaResponse>("/api/quota"),
+
+  updateSessionName: (sessionId: string, name: string) =>
+    requestPatch<{ session_id: string; name: string }>(`/api/sessions/${sessionId}/name`, { name }),
 };

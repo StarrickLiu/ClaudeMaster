@@ -38,6 +38,7 @@ export interface ChatEventMap {
   "result": Record<string, unknown>;
   "result-stats": ResultStats;
   "session-id": string;
+  "status": string | null;
   "error": string;
   "closed": void;
 }
@@ -221,14 +222,20 @@ export class ChatClient {
       }
 
       case "system": {
+        const subtype = event["subtype"] as string | undefined;
         // init 事件表示 Claude 已就绪，携带真实 session_id
-        if (event["subtype"] === "init") {
+        if (subtype === "init") {
           this._setState("idle");
           const sessionId = event["session_id"] as string | undefined;
           if (sessionId) {
             this.emit("session-id", sessionId);
           }
           this._flushPending();
+        }
+        // status 事件：compacting / null（完成）
+        if (subtype === "status") {
+          const status = (event["status"] as string | null) ?? null;
+          this.emit("status", status);
         }
         break;
       }

@@ -16,6 +16,10 @@ export class SessionHeader extends LitElement {
   @property({ type: Boolean }) hasActiveBroker = false;
   /** 当前会话的启动配置（用于配置摘要和对话框预填充） */
   @property({ type: Object }) launchConfig: Record<string, unknown> | null = null;
+  /** 会话来源："local" | "remote" */
+  @property() source = "local";
+  /** 远程主机名 */
+  @property() hostname = "";
 
   @state() private _configOpen = false;
   @state() private _copied = false;
@@ -58,6 +62,9 @@ export class SessionHeader extends LitElement {
       display: flex;
       align-items: center;
       gap: var(--space-xs);
+      flex-wrap: wrap;
+      min-width: 0;
+      overflow-wrap: break-word;
     }
 
     .name-display {
@@ -81,15 +88,27 @@ export class SessionHeader extends LitElement {
       background: var(--color-bg);
       color: var(--color-text);
       max-width: 200px;
+      width: 100%;
+    }
+
+    .hostname-badge {
+      background: var(--color-primary-bg, #dbeafe);
+      color: var(--color-primary, #2563eb);
+      font-size: var(--font-size-xs);
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: var(--radius-sm);
+      white-space: nowrap;
     }
 
     .session-meta {
       font-size: var(--font-size-xs);
       color: var(--color-text-muted);
       display: flex;
-      gap: var(--space-md);
+      gap: var(--space-sm);
       flex-wrap: wrap;
       margin-top: var(--space-xs);
+      min-width: 0;
     }
 
     .branch-tag {
@@ -113,6 +132,10 @@ export class SessionHeader extends LitElement {
       user-select: none;
       transition: background 0.15s, border-color 0.15s, color 0.15s;
       color: var(--color-text-muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 100%;
     }
 
     .session-id-chip:hover {
@@ -239,7 +262,19 @@ export class SessionHeader extends LitElement {
     const cwd = this.summary?.project_path;
     if (!id) return;
     const cmd = cwd ? `cd ${cwd} && claude --resume ${id}` : `claude --resume ${id}`;
-    await navigator.clipboard.writeText(cmd);
+    try {
+      await navigator.clipboard.writeText(cmd);
+    } catch {
+      // clipboard API 不可用时回退到 execCommand
+      const ta = document.createElement("textarea");
+      ta.value = cmd;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     this._copied = true;
     setTimeout(() => { this._copied = false; }, 1500);
   }
@@ -343,6 +378,7 @@ export class SessionHeader extends LitElement {
                   /> · ${s?.project_name ?? ""}`
                 : html`<span class="name-display" @click=${this._startEdit}>${this.sessionName}</span> · ${s?.project_name ?? ""}`
               : s?.project_name ?? ""}
+            ${this.source === "remote" && this.hostname ? html`<span class="hostname-badge">${this.hostname}</span>` : nothing}
           </div>
           <div class="session-meta">
             <span>${s?.start_time ? formatDateTime(s.start_time) : ""}</span>
@@ -382,6 +418,8 @@ export class SessionHeader extends LitElement {
             >
               接入会话
             </button>`
+          : this.source === "remote"
+          ? nothing
           : html`<button
               class="resume-btn"
               @click=${() => { this._configOpen = true; }}

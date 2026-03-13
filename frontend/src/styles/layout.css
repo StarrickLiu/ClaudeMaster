@@ -21,7 +21,7 @@
 .card-grid {
   display: grid;
   gap: var(--space-md);
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
 }
 
 .section-title {
@@ -86,6 +86,7 @@
   .page {
     padding: var(--space-md);
     padding-bottom: 72px;
+    overflow-x: hidden;
   }
 
   .card-grid {

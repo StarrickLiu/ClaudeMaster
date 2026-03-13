@@ -58,6 +58,8 @@ export class SessionCard extends LitElement {
       font-weight: 600;
       color: var(--color-primary);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .session-name {
@@ -65,6 +67,8 @@ export class SessionCard extends LitElement {
       font-weight: 500;
       color: var(--color-text-secondary);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .name-sep {

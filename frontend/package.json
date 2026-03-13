@@ -1,7 +1,8 @@
 {
   "name": "claudemaster-frontend",
-  "private": true,
+  "description": "Web-based management platform for Claude Code instances",
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",

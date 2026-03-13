@@ -236,7 +236,8 @@ class ClaudeBroker:
         cs._stdout_task = asyncio.create_task(self._read_stdout(cs))
         cs._stderr_task = asyncio.create_task(self._read_stderr(cs))
 
-        # 等待 init 事件获取 Claude 真实 session_id（最多 30 秒）
+        # 短暂等待 init（最多 3 秒），获取 Claude 真实 session_id
+        # 超时不阻塞 —— WebSocket 会在 init 到达后转发 session-id 给前端
         new_init_event: asyncio.Event = asyncio.Event()
 
         async def _on_init(ev: dict[str, Any]) -> None:
@@ -245,10 +246,9 @@ class ClaudeBroker:
 
         sub_id = cs.subscribe(_on_init)
         try:
-            await asyncio.wait_for(new_init_event.wait(), timeout=30.0)
+            await asyncio.wait_for(new_init_event.wait(), timeout=3.0)
         except asyncio.TimeoutError:
-            logger.warning("等待 Claude init 超时（30s），session_id=%s", initial_id[:8])
-            cs.state = "idle"
+            logger.info("Claude init 未在 3s 内到达，继续异步等待: session=%s", initial_id[:8])
         finally:
             cs.unsubscribe(sub_id)
 
@@ -371,20 +371,44 @@ class ClaudeBroker:
 
                 # 更新状态
                 event_type = event.get("type")
+                should_notify = True
                 if event_type == "stream_event":
                     if cs.state == "waiting_permission" and cs.pending_control_request:
                         logger.info("[PERM] Claude 已自动批准，清除 pending_control_request")
                         cs.pending_control_request = None
                     cs.state = "streaming"
                 elif event_type == "control_request":
-                    cs.state = "waiting_permission"
-                    cs.pending_control_request = event
-                    logger.info("[PERM] control_request: %s", json.dumps(event, ensure_ascii=False)[:500])
+                    perm = cs.launch_config.get("permission_mode", "")
+                    if perm == "bypassPermissions":
+                        # stream-json 模式下 CLI 仍发送 control_request 并等待回复，
+                        # bypassPermissions 时由 broker 自动批准，不转发给前端
+                        request_id = event.get("request_id", "")
+                        req = event.get("request", {})
+                        tool_name = req.get("tool_name") or req.get("toolName", "")
+                        logger.info("[PERM] 自动批准 (bypassPermissions): %s", tool_name)
+                        if request_id and cs.process.stdin:
+                            resp: dict[str, Any] = {
+                                "type": "control_response",
+                                "request_id": request_id,
+                                "behavior": "allow",
+                            }
+                            input_data = req.get("input")
+                            if input_data:
+                                resp["updatedInput"] = input_data
+                            data = json.dumps(resp, ensure_ascii=False) + "\n"
+                            cs.process.stdin.write(data.encode("utf-8"))
+                            await cs.process.stdin.drain()
+                        should_notify = False
+                    else:
+                        cs.state = "waiting_permission"
+                        cs.pending_control_request = event
+                        logger.info("[PERM] control_request: %s", json.dumps(event, ensure_ascii=False)[:500])
                 elif event_type == "result":
                     cs.state = "idle"
                     cs.pending_control_request = None
 
-                await cs._notify(event)
+                if should_notify:
+                    await cs._notify(event)
         except asyncio.CancelledError:
             pass
         except Exception:

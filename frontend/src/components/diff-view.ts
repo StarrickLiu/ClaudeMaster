@@ -178,7 +178,8 @@ export class DiffView extends LitElement {
       font-size: var(--font-size-xs);
       line-height: 1.6;
       padding: 0 var(--space-md);
-      white-space: pre;
+      white-space: pre-wrap;
+      word-break: break-all;
       min-height: 1.6em;
     }
 

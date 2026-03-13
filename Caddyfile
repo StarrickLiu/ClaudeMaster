@@ -1,0 +1,28 @@
+# ClaudeMaster HTTPS 反向代理
+# 用法：caddy run --config Caddyfile
+#
+# 默认监听 :8420（HTTPS），反向代理到后端 :8421（内部 HTTP）
+# 使用自签名证书（tls internal），手机首次访问时信任即可
+#
+# 环境变量：
+#   CM_LISTEN  — Caddy 监听地址（默认 :8420）
+#   CM_BACKEND — 后端地址（默认 127.0.0.1:8421）
+
+{
+	admin 127.0.0.1:2020
+	auto_https disable_redirects
+}
+
+{$CM_LISTEN::8420} {
+	tls certs/cert.pem certs/key.pem
+
+	# WebSocket 路径
+	handle /ws/* {
+		reverse_proxy {$CM_BACKEND:127.0.0.1:8421}
+	}
+
+	# API + 静态文件
+	handle {
+		reverse_proxy {$CM_BACKEND:127.0.0.1:8421}
+	}
+}

@@ -1,0 +1,16 @@
+/* ClaudeMaster — Claude 橙色主题 */
+
+:root {
+  --md-primary-fg-color: #d97757;
+  --md-primary-fg-color--light: #e09578;
+  --md-primary-fg-color--dark: #c4613f;
+  --md-accent-fg-color: #d97757;
+  --md-accent-fg-color--transparent: #d9775720;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #de7356;
+  --md-primary-fg-color--light: #e89a82;
+  --md-primary-fg-color--dark: #c45e3e;
+  --md-accent-fg-color: #de7356;
+}

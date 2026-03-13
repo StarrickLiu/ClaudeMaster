@@ -99,6 +99,7 @@ def _parse_timestamp(ts: str) -> datetime | None:
             return datetime.fromisoformat(ts_clean)
         return None
     except Exception:
+        logger.debug("时间戳解析失败: %s", ts, exc_info=True)
         return None
 
 

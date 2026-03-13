@@ -72,6 +72,8 @@ export class MessageBubble extends LitElement {
       margin: var(--space-sm) 0;
       font-size: var(--font-size-xs);
       line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
 
     .content pre code {
@@ -87,6 +89,7 @@ export class MessageBubble extends LitElement {
       border-radius: 4px;
       font-size: 0.85em;
       font-family: var(--font-mono, monospace);
+      word-break: break-word;
     }
 
     .content ul, .content ol {
@@ -122,6 +125,8 @@ export class MessageBubble extends LitElement {
       width: 100%;
       margin: var(--space-sm) 0;
       font-size: var(--font-size-xs);
+      display: block;
+      overflow-x: auto;
     }
     .content th, .content td {
       border: 1px solid var(--color-border);
