@@ -412,11 +412,9 @@ class ClientHub:
 
         # 存储远程会话摘要
         sessions = msg.get("sessions", [])
+        logger.info("agent %s 上报 %d 个进程, %d 个会话", agent.agent_id[:8], len(items), len(sessions))
         if sessions:
             agent.remote_sessions = {s["session_id"]: s for s in sessions if s.get("session_id")}
-            logger.debug("agent %s 上报 %d 个进程, %d 个会话", agent.agent_id[:8], len(items), len(sessions))
-        else:
-            logger.debug("agent %s 上报 %d 个进程", agent.agent_id[:8], len(items))
 
     async def handle_session_detail(self, agent: AgentConnection, msg: dict[str, Any]) -> None:
         """处理 agent 返回的完整会话内容，解锁等待中的 Future。"""

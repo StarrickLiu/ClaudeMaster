@@ -167,15 +167,49 @@ class SessionScanner:
 
     def __init__(self) -> None:
         self._projects_dir = Path.home() / ".claude" / "projects"
+        # 构建目录名 → 实际路径的索引（解码时把 '-' 都还原为 '/'，再和真实路径比较）
+        self._dir_index: dict[str, Path] | None = None
 
-    def _encode_path(self, cwd: str) -> str:
-        """将项目路径编码为 Claude 的目录名格式。"""
-        return cwd.replace("/", "-")
+    def _build_dir_index(self) -> dict[str, Path]:
+        """构建 cwd → project_dir 的映射。
+
+        Claude CLI 编码规则把 '/' 和 '_' 都替换为 '-'，导致无法从 cwd 直接推算目录名。
+        改为遍历所有目录，尝试和 cwd 匹配。
+        """
+        index: dict[str, Path] = {}
+        if not self._projects_dir.exists():
+            return index
+        for d in self._projects_dir.iterdir():
+            if not d.is_dir():
+                continue
+            # 目录名如 '-mnt-data-x2robot-v2-liuxingchen-codes-wall-x'
+            # 简单解码：把 '-' 还原为 '/'
+            decoded = d.name.replace("-", "/")
+            # decoded 可能和实际 cwd 不完全一致（因为原始路径含 '-' 或 '_'）
+            # 存储 decoded → dir 的映射，后续通过规范化比较
+            index[decoded] = d
+        return index
+
+    def _find_project_dir(self, cwd: str) -> Path | None:
+        """查找 cwd 对应的 projects 子目录。"""
+        if self._dir_index is None:
+            self._dir_index = self._build_dir_index()
+
+        # 将 cwd 中的 '_' 和 '/' 都替换为 '/' 后做规范化比较
+        normalized_cwd = cwd.replace("_", "/").replace("-", "/").lower()
+        for decoded, project_dir in self._dir_index.items():
+            normalized_decoded = decoded.replace("_", "/").replace("-", "/").lower()
+            if normalized_cwd == normalized_decoded:
+                return project_dir
+        return None
 
     def scan_sessions_for_cwds(self, cwds: list[str]) -> list[dict]:
         """为给定的 cwd 列表查找最新会话摘要。"""
         if not self._projects_dir.exists():
             return []
+
+        # 每次扫描重建索引（目录可能变化）
+        self._dir_index = self._build_dir_index()
 
         summaries: list[dict] = []
         seen_cwds: set[str] = set()
@@ -185,9 +219,8 @@ class SessionScanner:
                 continue
             seen_cwds.add(cwd)
 
-            encoded = self._encode_path(cwd)
-            project_dir = self._projects_dir / encoded
-            if not project_dir.is_dir():
+            project_dir = self._find_project_dir(cwd)
+            if not project_dir:
                 continue
 
             # 找最新的 JSONL 文件
@@ -313,8 +346,9 @@ class SessionScanner:
 
     def read_session_detail(self, session_id: str, project_path: str) -> dict | None:
         """读取完整 JSONL 文件，返回原始行列表供服务端解析。"""
-        encoded = self._encode_path(project_path)
-        project_dir = self._projects_dir / encoded
+        project_dir = self._find_project_dir(project_path)
+        if not project_dir:
+            return None
         path = project_dir / f"{session_id}.jsonl"
         if not path.exists():
             # 尝试子目录
