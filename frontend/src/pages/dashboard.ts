@@ -445,9 +445,10 @@ export class DashboardPage extends LitElement {
     } catch { /* 静默失败 */ }
   }
 
-  private _navToSession(sessionId: string, projectPath: string) {
+  private _navToSession(sessionId: string, projectPath: string, agentId?: string) {
     const encoded = projectPath.replace(/\//g, "-");
-    location.hash = `#/viewer/${encoded}/${sessionId}`;
+    const suffix = agentId ? `?agent=${agentId}` : "";
+    location.hash = `#/viewer/${encoded}/${sessionId}${suffix}`;
   }
 
   private async _stopSession(sessionId: string) {
@@ -789,8 +790,12 @@ export class DashboardPage extends LitElement {
             ${remoteStandbyProcesses.map(({ agent, process: p, session }) => {
               const machine = showMachineBadge ? (agentNameMap.get(agent.agent_id) || agent.hostname) : "";
               if (session) {
-                // 有匹配的远程 JSONL 会话，渲染为 session-card
-                return html`<cm-session-card .data=${{ ...session, is_active: true }} .brokerName=${machine}></cm-session-card>`;
+                // 有匹配的远程 JSONL 会话，渲染为 session-card，点击时带 agentId
+                return html`<cm-session-card
+                  .data=${{ ...session, is_active: true }}
+                  .brokerName=${machine}
+                  @click=${(e: Event) => { e.preventDefault(); this._navToSession(session.session_id, session.project_path, agent.agent_id); }}
+                ></cm-session-card>`;
               }
               const asProcess = {
                 pid: p.pid,

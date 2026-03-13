@@ -42,6 +42,8 @@ function generateUUID(): string {
 export class ViewerPage extends LitElement {
   @property() sessionId = "";
   @property() project = "";
+  /** 远程 agent ID（从 URL ?agent=xxx 解析），有值时通过远程 API 加载 */
+  @state() private _agentId = "";
 
   @state() data: SessionDetail | null = null;
   @state() loading = true;
@@ -505,6 +507,11 @@ export class ViewerPage extends LitElement {
   private async _load() {
     this.loading = true;
 
+    // 解析 URL 中的 ?agent=xxx 参数
+    const hashQuery = location.hash.split("?")[1] || "";
+    const urlParams = new URLSearchParams(hashQuery);
+    this._agentId = urlParams.get("agent") || "";
+
     // 优先检查 sessionStorage（新建会话时 dashboard 会提前写入）
     const storedPath = sessionStorage.getItem(`cm_new_session:${this.sessionId}`);
     if (storedPath) {
@@ -537,7 +544,9 @@ export class ViewerPage extends LitElement {
 
       // 用最佳 ID 加载 JSONL（brokerSessionId > URL sessionId）
       const jsonlId = this.brokerSessionId || this.sessionId;
-      const session = await api.getSession(jsonlId, this.project).catch(() => null);
+      const session = this._agentId
+        ? await api.getAgentSessionDetail(this._agentId, jsonlId).catch(() => null)
+        : await api.getSession(jsonlId, this.project).catch(() => null);
 
       if (session) {
         this.data = session;
@@ -576,7 +585,9 @@ export class ViewerPage extends LitElement {
   private async _reload() {
     const sid = this._resolveSessionId();
     try {
-      const fresh = await api.getSession(sid, this.project);
+      const fresh = this._agentId
+        ? await api.getAgentSessionDetail(this._agentId, sid)
+        : await api.getSession(sid, this.project);
       this.data = fresh;
       this._buildToolResultMap();
     } catch (e) {
