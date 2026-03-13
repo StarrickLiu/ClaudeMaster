@@ -20,6 +20,7 @@ import os
 import platform
 import shutil
 import signal
+import ssl
 import sys
 import uuid
 from pathlib import Path
@@ -281,6 +282,7 @@ class CmAgent:
         token: str | None,
         mode: str = "daemon",
         allowed_paths: list[str] | None = None,
+        no_verify_ssl: bool = False,
         # oneshot 专用参数
         claude_args: list[str] | None = None,
         project_path: str | None = None,
@@ -289,6 +291,7 @@ class CmAgent:
         self.token = token
         self.mode = mode
         self.allowed_paths = allowed_paths or []
+        self.no_verify_ssl = no_verify_ssl
         self.claude_args = claude_args or []
         self.project_path = project_path or os.getcwd()
         self.client_id = load_or_create_client_id() if mode == "daemon" else uuid.uuid4().hex
@@ -400,7 +403,14 @@ class CmAgent:
 
             try:
                 logger.info("连接服务端: %s", self.server_url)
-                async with ws_connect(url) as ws:
+                # 自签名证书支持
+                ws_kwargs: dict = {}
+                if self.no_verify_ssl and url.startswith("wss://"):
+                    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ssl_ctx.check_hostname = False
+                    ssl_ctx.verify_mode = ssl.CERT_NONE
+                    ws_kwargs["ssl"] = ssl_ctx
+                async with ws_connect(url, **ws_kwargs) as ws:
                     self.ws = ws
                     self._reconnect_delay = 1.0
 
@@ -845,6 +855,12 @@ def parse_args() -> tuple[argparse.Namespace, list[str], bool]:
         default=[],
         help="daemon 模式允许启动 Claude 的目录列表",
     )
+    parser.add_argument(
+        "--no-verify-ssl",
+        action="store_true",
+        default=False,
+        help="跳过 SSL 证书验证（用于自签名证书）",
+    )
 
     args = parser.parse_args(agent_args)
 
@@ -864,6 +880,7 @@ async def main() -> None:
         token=args.token,
         mode=mode,
         allowed_paths=args.allowed_paths,
+        no_verify_ssl=args.no_verify_ssl,
         claude_args=claude_args,
         project_path=args.project,
     )
