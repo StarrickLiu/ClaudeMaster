@@ -12,8 +12,6 @@
     "forceConsistentCasingInFileNames": true,
     "useDefineForClassFields": false,
     "experimentalDecorators": true,
-    "declaration": true,
-    "declarationMap": true,
     "sourceMap": true
   },
   "include": ["src"]

@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-# cm-agent：Claude Code 的轻量 sidecar，将 Claude CLI 接入 ClaudeMaster 服务端
+# cm-agent：Claude Code 的轻量 sidecar，支持 daemon 常驻模式和 oneshot 单次模式
 """
 用法：
-    cm-agent --server wss://my-server:8420 --token secret -- --resume abc123
+    # daemon 模式（常驻守护进程，管理多个 Claude 会话）
+    cm-agent --server wss://server:8420 --token secret --allowed-paths /home/user/projects
 
-所有 -- 之后的参数透传给 Claude CLI。
+    # oneshot 模式（单次启动，绑定一个 Claude 进程，保持向后兼容）
+    cm-agent --server wss://server:8420 --token secret --project /path -- --resume abc123
+
+检测到 -- 参数时自动进入 oneshot 模式，否则进入 daemon 模式。
 """
 from __future__ import annotations
 
@@ -16,7 +20,9 @@ import os
 import platform
 import shutil
 import signal
+import ssl
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -34,6 +40,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("cm-agent")
 
+# 持久 client_id 配置文件路径
+CONFIG_DIR = Path.home() / ".config" / "cm-agent"
+CONFIG_FILE = CONFIG_DIR / "agent.json"
+
+# 进程扫描间隔（秒）
+PROCESS_SCAN_INTERVAL = 10
+
 
 def find_claude_bin() -> str:
     """查找 claude 二进制。"""
@@ -50,30 +63,530 @@ def find_claude_bin() -> str:
     return "claude"
 
 
+def load_or_create_client_id() -> str:
+    """加载或创建持久化的 client_id。"""
+    if CONFIG_FILE.exists():
+        try:
+            data = json.loads(CONFIG_FILE.read_text())
+            if cid := data.get("client_id"):
+                return cid
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    cid = uuid.uuid4().hex
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        CONFIG_FILE.write_text(json.dumps({"client_id": cid}, indent=2))
+        logger.info("已生成持久 client_id: %s", cid[:8])
+    except OSError:
+        logger.warning("无法保存 client_id 到 %s", CONFIG_FILE)
+    return cid
+
+
+class ProcessScanner:
+    """扫描系统中运行的 Claude Code 进程。"""
+
+    def __init__(self, managed_pids: set[int]) -> None:
+        self._managed_pids = managed_pids
+
+    def scan(self) -> list[dict]:
+        """扫描 /proc 查找 Claude Code 进程。"""
+        processes: list[dict] = []
+        proc = Path("/proc")
+
+        try:
+            clk_tck = os.sysconf("SC_CLK_TCK")
+            system_uptime = float(Path("/proc/uptime").read_text().split()[0])
+        except (FileNotFoundError, ValueError, OSError):
+            return processes
+
+        my_pid = os.getpid()
+
+        for pid_dir in proc.iterdir():
+            if not pid_dir.name.isdigit():
+                continue
+            pid = int(pid_dir.name)
+            if pid == my_pid:
+                continue
+
+            try:
+                cmdline_bytes = (pid_dir / "cmdline").read_bytes()
+                cmdline = cmdline_bytes.replace(b"\x00", b" ").decode("utf-8", errors="replace").strip()
+            except (PermissionError, FileNotFoundError, ProcessLookupError):
+                continue
+
+            if not cmdline:
+                continue
+
+            is_claude = "claude" in cmdline.lower() and (
+                "cli.js" in cmdline
+                or cmdline.split()[0].endswith("/claude")
+                or cmdline.split()[0] == "claude"
+            )
+            if not is_claude:
+                continue
+            if "--chrome-native-host" in cmdline:
+                continue
+
+            cwd = self._read_cwd(pid_dir, cmdline_bytes)
+
+            uptime_seconds = 0.0
+            try:
+                stat_content = (pid_dir / "stat").read_text()
+                after_comm = stat_content.split(")")[1].split()
+                start_ticks = int(after_comm[19])
+                process_start = start_ticks / clk_tck
+                uptime_seconds = max(0, system_uptime - process_start)
+            except (IndexError, ValueError, FileNotFoundError, PermissionError):
+                pass
+
+            project_name = Path(cwd).name if cwd else None
+
+            processes.append({
+                "pid": pid,
+                "cwd": cwd,
+                "uptime_seconds": round(uptime_seconds, 1),
+                "project_name": project_name,
+                "managed": pid in self._managed_pids,
+            })
+
+        return processes
+
+    @staticmethod
+    def _read_cwd(pid_dir: Path, cmdline_bytes: bytes) -> str:
+        """尝试多种方式获取进程工作目录。"""
+        # 方式1：直接读 /proc/{pid}/cwd 符号链接
+        try:
+            return str((pid_dir / "cwd").resolve())
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        # 方式2：从 /proc/{pid}/environ 中提取 PWD
+        try:
+            environ_bytes = (pid_dir / "environ").read_bytes()
+            for entry in environ_bytes.split(b"\x00"):
+                if entry.startswith(b"PWD="):
+                    pwd = entry[4:].decode("utf-8", errors="replace")
+                    if pwd and pwd.startswith("/"):
+                        return pwd
+        except (PermissionError, FileNotFoundError, OSError):
+            pass
+
+        # 方式3：从 cmdline 参数中查找 -p 后的项目路径或 --add-dir
+        args = cmdline_bytes.split(b"\x00")
+        args_str = [a.decode("utf-8", errors="replace") for a in args if a]
+        for i, arg in enumerate(args_str):
+            if arg == "-p" and i + 1 < len(args_str):
+                candidate = args_str[i + 1]
+                if candidate.startswith("/"):
+                    return candidate
+
+        return ""
+
+
+class SessionScanner:
+    """扫描 ~/.claude/projects/ 查找 JSONL 会话并生成摘要。"""
+
+    # 不进入对话视图的消息类型
+    SKIP_TYPES = frozenset({
+        "progress", "agent_progress", "hook_progress",
+        "file-history-snapshot", "direct", "create", "update",
+        "queue-operation", "system",
+    })
+
+    def __init__(self) -> None:
+        self._projects_dir = Path.home() / ".claude" / "projects"
+        # 构建目录名 → 实际路径的索引（解码时把 '-' 都还原为 '/'，再和真实路径比较）
+        self._dir_index: dict[str, Path] | None = None
+
+    def _build_dir_index(self) -> dict[str, Path]:
+        """构建 cwd → project_dir 的映射。
+
+        Claude CLI 编码规则把 '/' 和 '_' 都替换为 '-'，导致无法从 cwd 直接推算目录名。
+        改为遍历所有目录，尝试和 cwd 匹配。
+        """
+        index: dict[str, Path] = {}
+        if not self._projects_dir.exists():
+            return index
+        for d in self._projects_dir.iterdir():
+            if not d.is_dir():
+                continue
+            # 目录名如 '-mnt-data-x2robot-v2-liuxingchen-codes-wall-x'
+            # 简单解码：把 '-' 还原为 '/'
+            decoded = d.name.replace("-", "/")
+            # decoded 可能和实际 cwd 不完全一致（因为原始路径含 '-' 或 '_'）
+            # 存储 decoded → dir 的映射，后续通过规范化比较
+            index[decoded] = d
+        return index
+
+    def _find_project_dir(self, cwd: str) -> Path | None:
+        """查找 cwd 对应的 projects 子目录。"""
+        if self._dir_index is None:
+            self._dir_index = self._build_dir_index()
+
+        # 将 cwd 中的 '_' 和 '/' 都替换为 '/' 后做规范化比较
+        normalized_cwd = cwd.replace("_", "/").replace("-", "/").lower()
+        for decoded, project_dir in self._dir_index.items():
+            normalized_decoded = decoded.replace("_", "/").replace("-", "/").lower()
+            if normalized_cwd == normalized_decoded:
+                return project_dir
+        return None
+
+    def scan_sessions_for_cwds(self, cwds: list[str]) -> list[dict]:
+        """为给定的 cwd 列表查找最新会话摘要。"""
+        if not self._projects_dir.exists():
+            return []
+
+        # 每次扫描重建索引（目录可能变化）
+        self._dir_index = self._build_dir_index()
+
+        summaries: list[dict] = []
+        seen_cwds: set[str] = set()
+
+        for cwd in cwds:
+            if not cwd or cwd in seen_cwds:
+                continue
+            seen_cwds.add(cwd)
+
+            project_dir = self._find_project_dir(cwd)
+            if not project_dir:
+                continue
+
+            # 找最新的 JSONL 文件
+            jsonl_files = sorted(
+                project_dir.glob("*.jsonl"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            if not jsonl_files:
+                continue
+
+            # 只取最新的一个
+            latest = jsonl_files[0]
+            try:
+                summary = self._parse_summary(latest, cwd)
+                if summary:
+                    summaries.append(summary)
+            except Exception:
+                logger.debug("解析 JSONL 失败: %s", latest, exc_info=True)
+
+        return summaries
+
+    def _parse_summary(self, path: Path, project_path: str) -> dict | None:
+        """轻量解析 JSONL 文件生成摘要。"""
+        session_id = path.stem
+        first_message = None
+        last_assistant_text = None
+        start_time = None
+        end_time = None
+        git_branch = None
+        user_turns = 0
+        tool_use_count = 0
+        message_count = 0
+        total_input = 0
+        total_output = 0
+        resume_session_id = None
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg_type = obj.get("type", "")
+                    if msg_type in self.SKIP_TYPES:
+                        continue
+                    if obj.get("isSidechain", False):
+                        continue
+
+                    message_count += 1
+                    ts = obj.get("timestamp", "")
+                    if start_time is None:
+                        start_time = ts
+                    end_time = ts
+
+                    if git_branch is None:
+                        git_branch = obj.get("gitBranch")
+
+                    if resume_session_id is None:
+                        resume_session_id = obj.get("sessionId")
+
+                    if msg_type == "user":
+                        content = obj.get("message", {}).get("content")
+                        # 跳过纯 tool_result 消息
+                        if isinstance(content, list) and all(
+                            isinstance(b, dict) and b.get("type") == "tool_result"
+                            for b in content
+                        ):
+                            continue
+                        user_turns += 1
+                        if first_message is None:
+                            if isinstance(content, str):
+                                first_message = content[:200]
+                            elif isinstance(content, list):
+                                for b in content:
+                                    if isinstance(b, dict) and b.get("type") == "text":
+                                        first_message = (b.get("text") or "")[:200]
+                                        break
+
+                    elif msg_type == "assistant":
+                        content = obj.get("message", {}).get("content")
+                        if isinstance(content, list):
+                            for b in content:
+                                if isinstance(b, dict):
+                                    if b.get("type") == "text" and b.get("text"):
+                                        last_assistant_text = b["text"][:300]
+                                    elif b.get("type") == "tool_use":
+                                        tool_use_count += 1
+
+                    usage = obj.get("message", {}).get("usage")
+                    if usage:
+                        total_input += usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+                        total_output += usage.get("output_tokens", 0)
+        except OSError:
+            return None
+
+        if message_count == 0:
+            return None
+
+        return {
+            "session_id": session_id,
+            "resume_session_id": resume_session_id,
+            "project_path": project_path,
+            "project_name": Path(project_path).name,
+            "first_message": first_message,
+            "last_assistant_text": last_assistant_text,
+            "user_turns": user_turns,
+            "tool_use_count": tool_use_count,
+            "message_count": message_count,
+            "start_time": start_time,
+            "end_time": end_time,
+            "git_branch": git_branch,
+            "is_active": False,
+            "total_input_tokens": total_input,
+            "total_output_tokens": total_output,
+            "name": "",
+        }
+
+    def read_session_detail(self, session_id: str, project_path: str) -> dict | None:
+        """读取完整 JSONL 文件，返回原始行列表供服务端解析。"""
+        project_dir = self._find_project_dir(project_path)
+        if not project_dir:
+            return None
+        path = project_dir / f"{session_id}.jsonl"
+        if not path.exists():
+            # 尝试子目录
+            path = project_dir / session_id / f"{session_id}.jsonl"
+            if not path.exists():
+                return None
+        try:
+            raw_lines = path.read_text(encoding="utf-8")
+            return {"session_id": session_id, "project_path": project_path, "raw_jsonl": raw_lines}
+        except OSError:
+            return None
+
+
+class AgentSession:
+    """管理单个 Claude 子进程。"""
+
+    def __init__(
+        self,
+        session_id: str,
+        project_path: str,
+        claude_args: list[str],
+        on_event: asyncio.coroutines,
+        on_exit: asyncio.coroutines,
+    ) -> None:
+        self.session_id = session_id
+        self.project_path = project_path
+        self.claude_args = claude_args
+        self._on_event = on_event
+        self._on_exit = on_exit
+        self.process: asyncio.subprocess.Process | None = None
+        self._tasks: list[asyncio.Task] = []
+
+    @property
+    def pid(self) -> int | None:
+        return self.process.pid if self.process else None
+
+    async def start(self) -> None:
+        """启动 Claude 子进程。"""
+        claude_bin = find_claude_bin()
+        cmd = [
+            claude_bin, "-p",
+            "--input-format", "stream-json",
+            "--output-format", "stream-json",
+            "--verbose",
+            "--include-partial-messages",
+            *self.claude_args,
+        ]
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+
+        logger.info("[session:%s] 启动 Claude: %s", self.session_id[:8], " ".join(cmd))
+        logger.info("[session:%s] 工作目录: %s", self.session_id[:8], self.project_path)
+
+        self.process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=self.project_path,
+            env=env,
+        )
+
+        self._tasks = [
+            asyncio.create_task(self._read_stdout()),
+            asyncio.create_task(self._read_stderr()),
+            asyncio.create_task(self._wait_exit()),
+            asyncio.create_task(self._heartbeat_loop()),
+        ]
+
+    async def stop(self) -> None:
+        """停止 Claude 子进程。"""
+        if self.process:
+            self.process.terminate()
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                self.process.kill()
+        for t in self._tasks:
+            t.cancel()
+
+    async def send(self, msg: dict) -> None:
+        """写入 Claude stdin。"""
+        if not self.process or not self.process.stdin:
+            return
+        data = json.dumps(msg, ensure_ascii=False) + "\n"
+        self.process.stdin.write(data.encode("utf-8"))
+        await self.process.stdin.drain()
+
+    async def _read_stdout(self) -> None:
+        """读取 Claude stdout，转发事件。"""
+        assert self.process and self.process.stdout
+        try:
+            while True:
+                line = await self.process.stdout.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if not text:
+                    continue
+                try:
+                    event = json.loads(text)
+                except json.JSONDecodeError:
+                    continue
+                await self._on_event(self.session_id, event)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.error("[session:%s] 读取 stdout 异常", self.session_id[:8], exc_info=True)
+
+    async def _heartbeat_loop(self) -> None:
+        """每 3 秒向后端发送会话级心跳，让前端知道进程仍在运行。"""
+        try:
+            while True:
+                await asyncio.sleep(3)
+                await self._on_event(self.session_id, {
+                    "type": "session_heartbeat",
+                    "ts": int(time.time() * 1000),
+                })
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.debug("[session:%s] 心跳循环异常", self.session_id[:8], exc_info=True)
+
+    async def _read_stderr(self) -> None:
+        """读取 Claude stderr。"""
+        assert self.process and self.process.stderr
+        try:
+            while True:
+                line = await self.process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    logger.debug("[session:%s] stderr: %s", self.session_id[:8], text)
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    async def _wait_exit(self) -> None:
+        """等待进程退出。"""
+        if not self.process:
+            return
+        await self.process.wait()
+        exit_code = self.process.returncode
+        logger.info("[session:%s] Claude 进程退出: exit_code=%s", self.session_id[:8], exit_code)
+        await self._on_exit(self.session_id, exit_code)
+
+
 class CmAgent:
-    """cm-agent 主类：管理 Claude 子进程和服务端 WebSocket 连接。"""
+    """cm-agent 主类：支持 daemon（多会话）和 oneshot（单会话）模式。"""
 
     def __init__(
         self,
         server_url: str,
         token: str | None,
-        claude_args: list[str],
-        project_path: str,
+        mode: str = "daemon",
+        allowed_paths: list[str] | None = None,
+        no_verify_ssl: bool = False,
+        # oneshot 专用参数
+        claude_args: list[str] | None = None,
+        project_path: str | None = None,
     ) -> None:
         self.server_url = server_url
         self.token = token
-        self.claude_args = claude_args
-        self.project_path = project_path
-        self.client_id = uuid.uuid4().hex
+        self.mode = mode
+        self.allowed_paths = allowed_paths or []
+        self.no_verify_ssl = no_verify_ssl
+        self.claude_args = claude_args or []
+        self.project_path = project_path or os.getcwd()
+        self.client_id = load_or_create_client_id() if mode == "daemon" else uuid.uuid4().hex
         self.hostname = platform.node()
         self.ws: websockets.ClientConnection | None = None
-        self.process: asyncio.subprocess.Process | None = None
         self._running = True
         self._reconnect_delay = 1.0
         self._max_reconnect_delay = 30.0
 
+        # 会话池（daemon 模式下管理多个会话）
+        self._sessions: dict[str, AgentSession] = {}
+        self._managed_pids: set[int] = set()
+
     async def run(self) -> None:
-        """主入口：启动 Claude 子进程，连接服务端，双向转发。"""
+        """主入口。"""
+        if self.mode == "oneshot":
+            await self._run_oneshot()
+        else:
+            await self._run_daemon()
+
+    async def _run_daemon(self) -> None:
+        """daemon 模式：常驻连接，等待服务端指令，扫描进程。"""
+        logger.info("cm-agent daemon 模式启动")
+        logger.info("允许路径: %s", self.allowed_paths or "(不限)")
+
+        ws_task = asyncio.create_task(self._connect_server())
+        scan_task = asyncio.create_task(self._process_scan_loop())
+
+        try:
+            # daemon 模式下持续运行，直到收到终止信号
+            while self._running:
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._running = False
+            # 停止所有会话
+            for sess in list(self._sessions.values()):
+                await sess.stop()
+            ws_task.cancel()
+            scan_task.cancel()
+
+    async def _run_oneshot(self) -> None:
+        """oneshot 模式：启动 Claude 子进程，连接服务端，双向转发（向后兼容）。"""
         # 启动 Claude 子进程
         claude_bin = find_claude_bin()
         cmd = [
@@ -85,14 +598,13 @@ class CmAgent:
             *self.claude_args,
         ]
 
-        # 必须移除 CLAUDECODE 环境变量
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
         logger.info("启动 Claude: %s", " ".join(cmd))
         logger.info("工作目录: %s", self.project_path)
 
         try:
-            self.process = await asyncio.create_subprocess_exec(
+            self._oneshot_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
@@ -104,21 +616,15 @@ class CmAgent:
             logger.error("找不到 Claude 命令: %s", claude_bin)
             sys.exit(1)
 
-        # 处理终端 stdin（用户在终端输入）
         stdin_task = asyncio.create_task(self._read_terminal_stdin())
-        # 读取 Claude stdout 并转发
-        stdout_task = asyncio.create_task(self._read_claude_stdout())
-        # 读取 Claude stderr
-        stderr_task = asyncio.create_task(self._read_claude_stderr())
-        # 连接服务端
+        stdout_task = asyncio.create_task(self._oneshot_read_stdout())
+        stderr_task = asyncio.create_task(self._oneshot_read_stderr())
         ws_task = asyncio.create_task(self._connect_server())
 
-        # 等待 Claude 进程结束
-        await self.process.wait()
-        exit_code = self.process.returncode
+        await self._oneshot_process.wait()
+        exit_code = self._oneshot_process.returncode
         logger.info("Claude 进程退出: exit_code=%s", exit_code)
 
-        # 通知服务端
         if self.ws:
             try:
                 await self.ws.send(json.dumps({
@@ -133,7 +639,6 @@ class CmAgent:
         stdin_task.cancel()
         ws_task.cancel()
 
-        # 等待清理
         for task in [stdout_task, stderr_task, stdin_task, ws_task]:
             try:
                 await task
@@ -149,30 +654,48 @@ class CmAgent:
 
             try:
                 logger.info("连接服务端: %s", self.server_url)
-                async with ws_connect(url) as ws:
+                # 自签名证书支持
+                ws_kwargs: dict = {}
+                if self.no_verify_ssl and url.startswith("wss://"):
+                    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                    ssl_ctx.check_hostname = False
+                    ssl_ctx.verify_mode = ssl.CERT_NONE
+                    ws_kwargs["ssl"] = ssl_ctx
+                async with ws_connect(url, **ws_kwargs) as ws:
                     self.ws = ws
                     self._reconnect_delay = 1.0
 
                     # 发送注册消息
-                    reg = {
+                    reg: dict = {
                         "type": "register",
                         "client_id": self.client_id,
                         "hostname": self.hostname,
-                        "project_path": self.project_path,
-                        "session_id": None,
-                        "agent_version": "0.1.0",
+                        "agent_version": "0.2.0",
+                        "mode": self.mode,
                     }
+                    if self.mode == "daemon":
+                        reg["allowed_paths"] = self.allowed_paths
+                    else:
+                        reg["project_path"] = self.project_path
+                        reg["session_id"] = None
+
                     await ws.send(json.dumps(reg))
 
                     # 等待注册确认
                     raw = await ws.recv()
                     resp = json.loads(raw)
                     if resp.get("type") == "registered":
-                        logger.info(
-                            "已注册: session_id=%s, name=%s",
-                            resp.get("session_id", "")[:8],
-                            resp.get("name", ""),
-                        )
+                        if self.mode == "daemon":
+                            logger.info(
+                                "已注册 (daemon): agent_id=%s",
+                                resp.get("agent_id", "")[:8],
+                            )
+                        else:
+                            logger.info(
+                                "已注册 (oneshot): session_id=%s, name=%s",
+                                resp.get("session_id", "")[:8],
+                                resp.get("name", ""),
+                            )
                     elif resp.get("type") == "error":
                         logger.error("注册失败: %s", resp.get("message"))
                         return
@@ -212,63 +735,350 @@ class CmAgent:
         """处理服务端下发的消息。"""
         msg_type = msg.get("type")
 
-        if msg_type == "user_message":
-            # 网页发送的用户消息 → 写入 Claude stdin
+        if msg_type == "ping":
+            # 服务端心跳探测，原样回复 pong
+            await self.ws.send(json.dumps({"type": "pong", "ts": msg.get("ts", 0)}))
+
+        elif msg_type == "start_session":
+            # daemon 模式：服务端请求启动新会话
+            await self._handle_start_session(msg)
+
+        elif msg_type == "stop_session":
+            # daemon 模式：服务端请求停止会话
+            await self._handle_stop_session(msg)
+
+        elif msg_type == "kill_processes":
+            # daemon 模式：服务端请求终止指定进程
+            await self._handle_kill_processes(msg)
+
+        elif msg_type == "query_processes":
+            # daemon 模式：服务端查询进程
+            await self._send_processes()
+
+        elif msg_type == "get_session_detail":
+            # 服务端请求某个会话的完整 JSONL 内容
+            await self._handle_get_session_detail(msg)
+
+        elif msg_type == "user_message":
+            session_id = msg.get("session_id")
             text = msg.get("text", "")
             source = msg.get("source", "web")
-            logger.info("[WEB→CLAUDE] %s (from %s)", text[:80], source)
-            await self._send_to_claude({
-                "type": "user",
-                "message": {"role": "user", "content": text},
-                "parent_tool_use_id": None,
-            })
+            logger.info("[WEB→CLAUDE] %s (from %s, session=%s)", text[:80], source, (session_id or "")[:8])
+
+            target = self._resolve_session(session_id)
+            if target:
+                await target.send({
+                    "type": "user",
+                    "message": {"role": "user", "content": text},
+                    "parent_tool_use_id": None,
+                })
+            elif self.mode == "oneshot":
+                await self._oneshot_send_to_claude({
+                    "type": "user",
+                    "message": {"role": "user", "content": text},
+                    "parent_tool_use_id": None,
+                })
 
         elif msg_type == "control_response":
-            # 网页回复的权限请求
+            session_id = msg.get("session_id")
             logger.info("[WEB→CLAUDE] control_response: %s", msg.get("request_id", "")[:8])
-            await self._send_to_claude(msg)
-            # 通知终端权限已处理
+
+            target = self._resolve_session(session_id)
+            if target:
+                await target.send(msg)
+            elif self.mode == "oneshot":
+                await self._oneshot_send_to_claude(msg)
             print(f"\n[cm-agent] 网页已处理权限请求: {msg.get('behavior', 'allow')}", file=sys.stderr)
 
         elif msg_type == "interrupt":
+            session_id = msg.get("session_id")
             logger.info("[WEB→CLAUDE] interrupt")
-            await self._send_to_claude({
+
+            interrupt_msg = {
                 "type": "control_request",
                 "request_id": uuid.uuid4().hex,
                 "request": {"subtype": "interrupt"},
-            })
+            }
+            target = self._resolve_session(session_id)
+            if target:
+                await target.send(interrupt_msg)
+            elif self.mode == "oneshot":
+                await self._oneshot_send_to_claude(interrupt_msg)
 
         elif msg_type == "_permission_handled":
-            # 终端已处理权限，网页无需再操作
             req_id = msg.get("request_id", "")
             logger.debug("权限已由其他端处理: %s", req_id[:8])
 
-    async def _send_to_claude(self, msg: dict) -> None:
-        """写入 Claude stdin。"""
-        if not self.process or not self.process.stdin:
+    def _resolve_session(self, session_id: str | None) -> AgentSession | None:
+        """根据 session_id 找到 AgentSession。"""
+        if session_id and session_id in self._sessions:
+            return self._sessions[session_id]
+        if len(self._sessions) == 1:
+            return next(iter(self._sessions.values()))
+        return None
+
+    # --- daemon 模式：会话管理 ---
+
+    async def _handle_start_session(self, msg: dict) -> None:
+        """处理服务端的 start_session 请求。"""
+        request_id = msg.get("request_id", "")
+        project_path = msg.get("project_path", "")
+        claude_args = msg.get("claude_args", [])
+        name = msg.get("name", "")
+
+        logger.info("收到 start_session 请求: project=%s, name=%s", project_path, name)
+
+        # 安全检查：路径白名单
+        if self.allowed_paths:
+            allowed = any(
+                project_path == p or project_path.startswith(p.rstrip("/") + "/")
+                for p in self.allowed_paths
+            )
+            if not allowed:
+                logger.warning("路径 %s 不在白名单中", project_path)
+                if self.ws:
+                    await self.ws.send(json.dumps({
+                        "type": "session_start_failed",
+                        "request_id": request_id,
+                        "error": f"路径 {project_path} 不在允许的目录列表中",
+                    }))
+                return
+
+        # 检查路径是否存在
+        if not Path(project_path).is_dir():
+            if self.ws:
+                await self.ws.send(json.dumps({
+                    "type": "session_start_failed",
+                    "request_id": request_id,
+                    "error": f"目录不存在: {project_path}",
+                }))
+            return
+
+        session_id = uuid.uuid4().hex
+
+        try:
+            sess = AgentSession(
+                session_id=session_id,
+                project_path=project_path,
+                claude_args=claude_args,
+                on_event=self._on_session_event,
+                on_exit=self._on_session_exit,
+            )
+            await sess.start()
+            self._sessions[session_id] = sess
+            if sess.pid:
+                self._managed_pids.add(sess.pid)
+
+            logger.info("会话已启动: session=%s, pid=%s", session_id[:8], sess.pid)
+
+            if self.ws:
+                await self.ws.send(json.dumps({
+                    "type": "session_started",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "project_path": project_path,
+                }))
+
+        except Exception as e:
+            logger.error("启动会话失败: %s", e, exc_info=True)
+            if self.ws:
+                await self.ws.send(json.dumps({
+                    "type": "session_start_failed",
+                    "request_id": request_id,
+                    "error": str(e),
+                }))
+
+    async def _handle_stop_session(self, msg: dict) -> None:
+        """处理服务端的 stop_session 请求。"""
+        session_id = msg.get("session_id", "")
+        sess = self._sessions.get(session_id)
+        if sess:
+            await sess.stop()
+            # cleanup 由 _on_session_exit 处理
+
+    async def _handle_kill_processes(self, msg: dict) -> None:
+        """处理服务端的 kill_processes 请求，终止指定 pid 列表。"""
+        pids: list[int] = msg.get("pids", [])
+        request_id = msg.get("request_id", "")
+        killed: list[int] = []
+        failed: list[int] = []
+
+        # 安全检查：不能 kill agent 自身和已托管的进程
+        my_pid = os.getpid()
+        for pid in pids:
+            if pid == my_pid:
+                logger.warning("拒绝 kill 自身进程 pid=%d", pid)
+                failed.append(pid)
+                continue
+            if pid in self._managed_pids:
+                logger.warning("拒绝 kill 托管进程 pid=%d，请使用 stop_session", pid)
+                failed.append(pid)
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+                killed.append(pid)
+                logger.info("已终止进程 pid=%d", pid)
+            except ProcessLookupError:
+                killed.append(pid)  # 已经不存在，视为成功
+            except PermissionError:
+                logger.warning("无权终止进程 pid=%d", pid)
+                failed.append(pid)
+            except Exception as e:
+                logger.warning("终止进程 pid=%d 失败: %s", pid, e)
+                failed.append(pid)
+
+        if self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "kill_processes_result",
+                    "request_id": request_id,
+                    "killed": killed,
+                    "failed": failed,
+                }))
+            except Exception:
+                pass
+
+        # 清理后立即重新上报进程列表
+        await asyncio.sleep(0.5)
+        await self._send_processes()
+
+    async def _handle_get_session_detail(self, msg: dict) -> None:
+        """处理服务端请求会话完整内容。"""
+        request_id = msg.get("request_id", "")
+        session_id = msg.get("session_id", "")
+        project_path = msg.get("project_path", "")
+
+        scanner = SessionScanner()
+        detail = scanner.read_session_detail(session_id, project_path)
+
+        if detail and self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "session_detail",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "project_path": project_path,
+                    "raw_jsonl": detail["raw_jsonl"],
+                }))
+            except Exception:
+                logger.debug("发送 session_detail 失败", exc_info=True)
+        elif self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "session_detail",
+                    "request_id": request_id,
+                    "session_id": session_id,
+                    "error": "会话文件不存在",
+                }))
+            except Exception:
+                pass
+
+    async def _on_session_event(self, session_id: str, event: dict) -> None:
+        """AgentSession 上报事件的回调。"""
+        if self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "event",
+                    "session_id": session_id,
+                    "event": event,
+                }))
+            except Exception:
+                pass
+
+        # 在终端显示关键事件
+        self._display_event(event, session_id)
+
+    async def _on_session_exit(self, session_id: str, exit_code: int) -> None:
+        """AgentSession 进程退出的回调。"""
+        sess = self._sessions.pop(session_id, None)
+        if sess and sess.pid:
+            self._managed_pids.discard(sess.pid)
+
+        if self.ws:
+            try:
+                await self.ws.send(json.dumps({
+                    "type": "agent_status",
+                    "session_id": session_id,
+                    "status": "claude_exited",
+                    "exit_code": exit_code,
+                }))
+            except Exception:
+                pass
+
+    # --- 进程扫描 ---
+
+    async def _process_scan_loop(self) -> None:
+        """定期扫描进程并上报。"""
+        scanner = ProcessScanner(self._managed_pids)
+        session_scanner = SessionScanner()
+        while self._running:
+            try:
+                await asyncio.sleep(PROCESS_SCAN_INTERVAL)
+                await self._send_processes(scanner, session_scanner)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.debug("进程扫描异常", exc_info=True)
+
+    async def _send_processes(
+        self,
+        scanner: ProcessScanner | None = None,
+        session_scanner: SessionScanner | None = None,
+    ) -> None:
+        """扫描并上报进程列表和会话摘要。"""
+        if not self.ws:
+            return
+        if scanner is None:
+            scanner = ProcessScanner(self._managed_pids)
+        items = scanner.scan()
+
+        # 同时扫描每个进程 cwd 对应的最新 JSONL 会话
+        sessions: list[dict] = []
+        if session_scanner is None:
+            session_scanner = SessionScanner()
+        cwds = [p["cwd"] for p in items if p.get("cwd")]
+        try:
+            sessions = session_scanner.scan_sessions_for_cwds(cwds)
+        except Exception:
+            logger.debug("会话扫描异常", exc_info=True)
+
+        try:
+            await self.ws.send(json.dumps({
+                "type": "processes",
+                "items": items,
+                "sessions": sessions,
+            }))
+        except Exception:
+            pass
+
+    # --- oneshot 模式兼容方法 ---
+
+    async def _oneshot_send_to_claude(self, msg: dict) -> None:
+        """写入 Claude stdin（oneshot 模式）。"""
+        proc = getattr(self, "_oneshot_process", None)
+        if not proc or not proc.stdin:
             return
         data = json.dumps(msg, ensure_ascii=False) + "\n"
-        self.process.stdin.write(data.encode("utf-8"))
-        await self.process.stdin.drain()
+        proc.stdin.write(data.encode("utf-8"))
+        await proc.stdin.drain()
 
-    async def _read_claude_stdout(self) -> None:
-        """读取 Claude stdout，同时转发到服务端和终端显示。"""
-        assert self.process and self.process.stdout
+    async def _oneshot_read_stdout(self) -> None:
+        """读取 Claude stdout（oneshot 模式）。"""
+        proc = self._oneshot_process
+        assert proc and proc.stdout
         try:
             while True:
-                line = await self.process.stdout.readline()
+                line = await proc.stdout.readline()
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
                 if not text:
                     continue
-
                 try:
                     event = json.loads(text)
                 except json.JSONDecodeError:
                     continue
 
-                # 转发到服务端
                 if self.ws:
                     try:
                         await self.ws.send(json.dumps({
@@ -278,7 +1088,6 @@ class CmAgent:
                     except Exception:
                         pass
 
-                # 在终端显示关键事件
                 self._display_event(event)
 
         except asyncio.CancelledError:
@@ -286,37 +1095,13 @@ class CmAgent:
         except Exception:
             logger.error("读取 Claude stdout 异常", exc_info=True)
 
-    def _display_event(self, event: dict) -> None:
-        """在终端显示 Claude 事件（简化输出）。"""
-        evt_type = event.get("type")
-
-        if evt_type == "system" and event.get("subtype") == "init":
-            sid = event.get("session_id", "")
-            print(f"[cm-agent] 会话已初始化: {sid[:12]}...", file=sys.stderr)
-
-        elif evt_type == "stream_event":
-            # 流式输出：提取文本增量显示
-            se = event.get("stream_event", {})
-            if se.get("type") == "content_block_delta":
-                delta = se.get("delta", {})
-                if delta.get("type") == "text_delta":
-                    print(delta.get("text", ""), end="", flush=True)
-
-        elif evt_type == "result":
-            print("", flush=True)  # 换行
-
-        elif evt_type == "control_request":
-            req = event.get("request", {})
-            tool_name = req.get("tool_name") or req.get("toolName", "")
-            print(f"\n[cm-agent] 权限请求: {tool_name}", file=sys.stderr)
-            print("[cm-agent] 可在终端或网页处理此请求", file=sys.stderr)
-
-    async def _read_claude_stderr(self) -> None:
-        """读取 Claude stderr 并显示。"""
-        assert self.process and self.process.stderr
+    async def _oneshot_read_stderr(self) -> None:
+        """读取 Claude stderr（oneshot 模式）。"""
+        proc = self._oneshot_process
+        assert proc and proc.stderr
         try:
             while True:
-                line = await self.process.stderr.readline()
+                line = await proc.stderr.readline()
                 if not line:
                     break
                 text = line.decode("utf-8", errors="replace").strip()
@@ -334,7 +1119,6 @@ class CmAgent:
         try:
             transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin)
         except OSError:
-            # stdin 不可用（如后台运行）
             logger.debug("终端 stdin 不可用")
             return
 
@@ -347,12 +1131,15 @@ class CmAgent:
                 if not text:
                     continue
 
-                # 终端输入直接写入 Claude stdin（不经过服务端）
-                await self._send_to_claude({
-                    "type": "user",
-                    "message": {"role": "user", "content": text},
-                    "parent_tool_use_id": None,
-                })
+                if self.mode == "oneshot":
+                    await self._oneshot_send_to_claude({
+                        "type": "user",
+                        "message": {"role": "user", "content": text},
+                        "parent_tool_use_id": None,
+                    })
+                else:
+                    # daemon 模式下终端输入不生效
+                    logger.debug("daemon 模式忽略终端输入")
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -360,9 +1147,47 @@ class CmAgent:
         finally:
             transport.close()
 
+    # --- 事件显示 ---
 
-def parse_args() -> tuple[argparse.Namespace, list[str]]:
-    """解析命令行参数，-- 之后的参数透传给 Claude。"""
+    def _display_event(self, event: dict, session_id: str | None = None) -> None:
+        """在终端显示 Claude 事件（简化输出）。"""
+        prefix = f"[session:{session_id[:8]}] " if session_id else ""
+        evt_type = event.get("type")
+
+        if evt_type == "system" and event.get("subtype") == "init":
+            sid = event.get("session_id", "")
+            print(f"[cm-agent] {prefix}会话已初始化: {sid[:12]}...", file=sys.stderr)
+
+        elif evt_type == "stream_event":
+            se = event.get("stream_event", {})
+            if se.get("type") == "content_block_delta":
+                delta = se.get("delta", {})
+                if delta.get("type") == "text_delta":
+                    print(delta.get("text", ""), end="", flush=True)
+
+        elif evt_type == "result":
+            print("", flush=True)
+
+        elif evt_type == "control_request":
+            req = event.get("request", {})
+            tool_name = req.get("tool_name") or req.get("toolName", "")
+            print(f"\n[cm-agent] {prefix}权限请求: {tool_name}", file=sys.stderr)
+            print(f"[cm-agent] {prefix}可在终端或网页处理此请求", file=sys.stderr)
+
+
+def parse_args() -> tuple[argparse.Namespace, list[str], bool]:
+    """解析命令行参数。返回 (args, claude_args, is_oneshot)。"""
+    # 分离 -- 之后的 Claude 参数
+    argv = sys.argv[1:]
+    has_double_dash = "--" in argv
+    if has_double_dash:
+        idx = argv.index("--")
+        agent_args = argv[:idx]
+        claude_args = argv[idx + 1:]
+    else:
+        agent_args = argv
+        claude_args = []
+
     parser = argparse.ArgumentParser(
         description="cm-agent：将 Claude Code 接入 ClaudeMaster 服务端",
     )
@@ -379,29 +1204,40 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
     parser.add_argument(
         "--project", "-p",
         default=os.getcwd(),
-        help="项目目录（默认当前目录）",
+        help="项目目录（默认当前目录，oneshot 模式）",
+    )
+    parser.add_argument(
+        "--allowed-paths",
+        nargs="*",
+        default=[],
+        help="daemon 模式允许启动 Claude 的目录列表",
+    )
+    parser.add_argument(
+        "--no-verify-ssl",
+        action="store_true",
+        default=False,
+        help="跳过 SSL 证书验证（用于自签名证书）",
     )
 
-    # 分离 -- 之后的 Claude 参数
-    argv = sys.argv[1:]
-    if "--" in argv:
-        idx = argv.index("--")
-        agent_args = argv[:idx]
-        claude_args = argv[idx + 1:]
-    else:
-        agent_args = argv
-        claude_args = []
-
     args = parser.parse_args(agent_args)
-    return args, claude_args
+
+    # 检测到 -- 参数时退化为 oneshot 模式
+    is_oneshot = has_double_dash
+
+    return args, claude_args, is_oneshot
 
 
 async def main() -> None:
-    args, claude_args = parse_args()
+    args, claude_args, is_oneshot = parse_args()
+
+    mode = "oneshot" if is_oneshot else "daemon"
 
     agent = CmAgent(
         server_url=args.server.rstrip("/"),
         token=args.token,
+        mode=mode,
+        allowed_paths=args.allowed_paths,
+        no_verify_ssl=args.no_verify_ssl,
         claude_args=claude_args,
         project_path=args.project,
     )
@@ -418,8 +1254,13 @@ async def _shutdown(agent: CmAgent) -> None:
     """优雅关闭。"""
     logger.info("正在关闭...")
     agent._running = False
-    if agent.process:
-        agent.process.terminate()
+    # oneshot 模式终止进程
+    proc = getattr(agent, "_oneshot_process", None)
+    if proc:
+        proc.terminate()
+    # daemon 模式停止所有会话
+    for sess in list(agent._sessions.values()):
+        await sess.stop()
 
 
 if __name__ == "__main__":

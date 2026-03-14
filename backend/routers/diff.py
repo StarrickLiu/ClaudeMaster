@@ -5,7 +5,8 @@ import asyncio
 import re
 
 from fastapi import APIRouter, Query, HTTPException
-from pydantic import BaseModel
+
+from models.diff import CommitInfo
 
 router = APIRouter(tags=["差异"])
 
@@ -25,19 +26,6 @@ async def _run_git(project_path: str, *args: str, allow_empty: bool = False) -> 
             detail=f"git 命令失败: {stderr.decode('utf-8', errors='replace')[:500]}",
         )
     return stdout.decode("utf-8", errors="replace")
-
-
-class CommitInfo(BaseModel):
-    """单条提交摘要。"""
-    hash: str
-    short_hash: str
-    subject: str
-    author: str
-    date: str          # ISO 8601
-    stat: str          # --stat 输出
-    insertions: int
-    deletions: int
-    files_changed: int
 
 
 @router.get(
@@ -63,23 +51,35 @@ async def get_commits(
     project_path: str = Query(..., description="项目绝对路径"),
     limit: int = Query(20, ge=1, le=100),
 ) -> list[CommitInfo]:
-    # 格式：hash|subject|author|date（用特殊分隔符避免正文中的 | 干扰）
+    # 使用单条 git log --stat 替代 N 次 git show，避免 N+1 性能问题
     SEP = "\x1f"
+    RECORD_SEP = "\x1e"
     log = await _run_git(
         project_path,
         "log",
-        f"--format=%H{SEP}%s{SEP}%an{SEP}%aI",
+        f"--format={RECORD_SEP}%H{SEP}%s{SEP}%an{SEP}%aI",
+        "--stat",
         f"-{limit}",
         allow_empty=True,
     )
     commits: list[CommitInfo] = []
-    for line in log.splitlines():
-        parts = line.split(SEP)
+    # 按记录分隔符拆分，跳过首个空段
+    records = log.split(RECORD_SEP)
+    for record in records:
+        record = record.strip()
+        if not record:
+            continue
+        # 首行是格式化字段，其余是 stat 输出
+        lines = record.split("\n", 1)
+        header = lines[0]
+        stat = lines[1].strip() if len(lines) > 1 else ""
+
+        parts = header.split(SEP)
         if len(parts) < 4:
             continue
         h, subject, author, date = parts[0], parts[1], parts[2], parts[3]
-        stat = await _run_git(project_path, "show", h, "--stat", "--format=", allow_empty=True)
-        # 解析最后一行 "N files changed, M insertions(+), K deletions(-)"
+
+        # 解析 stat 摘要行 "N files changed, M insertions(+), K deletions(-)"
         ins = dels = files = 0
         m = re.search(r"(\d+) file", stat)
         if m:
@@ -107,5 +107,7 @@ async def get_commit_diff(
     project_path: str = Query(..., description="项目绝对路径"),
     hash: str = Query(..., description="commit hash"),
 ) -> dict:
+    if not re.match(r'^[0-9a-f]{4,40}$', hash):
+        raise HTTPException(status_code=400, detail="无效的 commit hash")
     diff = await _run_git(project_path, "show", hash, "--format=", allow_empty=True)
     return {"diff": diff}

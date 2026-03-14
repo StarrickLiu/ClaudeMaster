@@ -2,43 +2,31 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property, state } from "lit/decorators.js";
 import { api } from "../api.js";
-import type { Project } from "../api.js";
+import type { Project, AgentInfo } from "../api.js";
 import type { LaunchConfig } from "./launch-config-dialog.js";
+import { MODEL_OPTIONS, PERMISSION_MODES, TOOL_PRESETS } from "../utils/constants.js";
 
 export interface NewSessionConfig extends LaunchConfig {
   projectPath: string;
   name: string;
+  agentId?: string;
 }
-
-const MODEL_OPTIONS = [
-  { value: "", label: "默认" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "opus", label: "Opus" },
-  { value: "haiku", label: "Haiku" },
-];
-
-const PERMISSION_MODES = [
-  { value: "default", label: "默认（手动确认）" },
-  { value: "acceptEdits", label: "自动接受编辑" },
-  { value: "plan", label: "仅计划模式" },
-  { value: "bypassPermissions", label: "跳过所有权限" },
-];
-
-const TOOL_PRESETS: { label: string; tools: string[] }[] = [
-  { label: "完全", tools: [] },
-  { label: "只读", tools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch"] },
-  { label: "无 Bash", tools: ["Read", "Glob", "Grep", "Edit", "Write", "WebFetch", "WebSearch"] },
-];
 
 @customElement("cm-new-session-dialog")
 export class NewSessionDialog extends LitElement {
   @property({ type: Boolean }) open = false;
+  /** 预选远程 agent（从外部传入） */
+  @property({ attribute: false }) initialAgentId = "";
+  /** 预填项目路径（从外部传入） */
+  @property({ attribute: false }) initialPath = "";
 
   @state() private _projects: Project[] = [];
   @state() private _projectsLoading = false;
   @state() private _selectedProject = "";   // encoded_name 或 "__custom__"
   @state() private _name = "";
   @state() private _customPath = "";
+  @state() private _agents: AgentInfo[] = [];
+  @state() private _selectedAgent = "";     // "" = 本机，agent_id = 远程
   @state() private _model = "";
   @state() private _permissionMode = "default";
   @state() private _toolPreset = 0;
@@ -262,17 +250,33 @@ export class NewSessionDialog extends LitElement {
     }
   `;
 
-  /** 打开时自动加载项目列表 */
+  /** 打开时自动加载项目列表，并应用预选参数 */
   updated(changed: Map<string, unknown>) {
-    if (changed.has("open") && this.open && this._projects.length === 0) {
-      this._loadProjects();
+    if (changed.has("open") && this.open) {
+      if (this._projects.length === 0) {
+        this._loadProjects();
+      }
+      // 应用外部预选参数
+      if (this.initialAgentId) {
+        this._selectedAgent = this.initialAgentId;
+        this._selectedProject = "__custom__";
+      }
+      if (this.initialPath) {
+        this._selectedProject = "__custom__";
+        this._customPath = this.initialPath;
+      }
     }
   }
 
   private async _loadProjects() {
     this._projectsLoading = true;
     try {
-      this._projects = await api.getProjects();
+      const [projects, agents] = await Promise.all([
+        api.getProjects(),
+        api.getAgents().catch(() => [] as AgentInfo[]),
+      ]);
+      this._projects = projects;
+      this._agents = agents.filter(a => a.state === "connected" && a.mode === "daemon");
       if (this._projects.length > 0 && !this._selectedProject) {
         this._selectedProject = this._projects[0].encoded_name;
       }
@@ -318,6 +322,7 @@ export class NewSessionDialog extends LitElement {
       maxTurns: this._maxTurns ? parseInt(this._maxTurns, 10) : null,
       appendSystemPrompt: this._systemPrompt.trim(),
       addDirs,
+      agentId: this._selectedAgent || undefined,
     };
     this.dispatchEvent(
       new CustomEvent("start", { detail: config, bubbles: true, composed: true })
@@ -337,6 +342,40 @@ export class NewSessionDialog extends LitElement {
             <span class="dialog-title">新建会话</span>
           </div>
           <div class="dialog-body">
+
+            <!-- 运行位置 -->
+            ${this._agents.length > 0 ? html`
+              <div class="field">
+                <div class="label">运行位置</div>
+                <select
+                  @change=${(e: Event) => {
+                    this._selectedAgent = (e.target as HTMLSelectElement).value;
+                    // 选择远程 agent 时强制使用自定义路径
+                    if (this._selectedAgent) {
+                      this._selectedProject = "__custom__";
+                    }
+                  }}
+                >
+                  <option value="" ?selected=${!this._selectedAgent}>本机</option>
+                  ${this._agents.map(a => html`
+                    <option value=${a.agent_id} ?selected=${this._selectedAgent === a.agent_id}>
+                      ${a.hostname}${a.allowed_paths.length > 0 ? ` (${a.allowed_paths.length} 个目录)` : ""}
+                    </option>
+                  `)}
+                </select>
+                ${this._selectedAgent ? html`
+                  <div class="hint">
+                    ${(() => {
+                      const agent = this._agents.find(a => a.agent_id === this._selectedAgent);
+                      if (!agent) return "";
+                      return agent.allowed_paths.length > 0
+                        ? `允许目录：${agent.allowed_paths.join("、")}`
+                        : "不限制目录";
+                    })()}
+                  </div>
+                ` : nothing}
+              </div>
+            ` : nothing}
 
             <!-- 项目选择 -->
             <div class="field">

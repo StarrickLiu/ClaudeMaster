@@ -1,25 +1,42 @@
-// 工作台首页：待审批 + 工作中 + 最近会话 + 用量
+// 工作台首页：统一视图 — 待审批 + 工作中 + 待命中 + 最近项目 + 用量
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, state } from "lit/decorators.js";
 import { api } from "../api.js";
-import type { ClaudeProcess, SessionSummary, UsageResponse, QuotaResponse, ChatSessionInfo } from "../api.js";
+import type { ClaudeProcess, SessionSummary, UsageResponse, QuotaResponse, ChatSessionInfo, AgentInfo, RemoteProcess } from "../api.js";
+import { timeAgo } from "../utils/time.js";
+import { formatUptime } from "../utils/format.js";
 import "../components/session-card.js";
 import "../components/process-card.js";
 import "../components/usage-card.js";
 import "../components/new-session-dialog.js";
 import type { NewSessionConfig } from "../components/new-session-dialog.js";
 
+/** 最近项目分组 */
+interface ProjectGroup {
+  projectPath: string;
+  projectName: string;
+  sessions: SessionSummary[];
+  latestEndTime: string;
+  hasActiveProcess: boolean;
+}
+
 @customElement("cm-dashboard")
 export class DashboardPage extends LitElement {
   @state() processes: ClaudeProcess[] = [];
   @state() sessions: SessionSummary[] = [];
   @state() chatSessions: ChatSessionInfo[] = [];
+  @state() agents: AgentInfo[] = [];
+  @state() agentProcesses: Map<string, RemoteProcess[]> = new Map();
+  @state() agentSessions: Map<string, SessionSummary[]> = new Map();
   @state() usage: UsageResponse | null = null;
   @state() quota: QuotaResponse | null = null;
   @state() loading = true;
   @state() private _newSessionOpen = false;
   @state() private _newSessionStarting = false;
   @state() private _newSessionError = "";
+  @state() private _newSessionAgentId = "";
+  @state() private _newSessionPath = "";
+  @state() private _expandedProjects: Set<string> = new Set();
 
   private _pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -145,7 +162,7 @@ export class DashboardPage extends LitElement {
       color: white;
     }
 
-    /* 待审批卡片 */
+    /* 待审批/工作中/待命中 通用卡片 */
     .pending-card {
       background: var(--color-surface);
       border: 1px solid var(--color-attention);
@@ -167,6 +184,7 @@ export class DashboardPage extends LitElement {
       align-items: center;
       gap: var(--space-sm);
       margin-bottom: var(--space-xs);
+      flex-wrap: wrap;
     }
 
     .pending-badge {
@@ -250,6 +268,38 @@ export class DashboardPage extends LitElement {
       align-items: center;
     }
 
+    /* 最近项目分组 */
+    .project-list { display: flex; flex-direction: column; gap: var(--space-sm); }
+    .project-group { background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-md); overflow: hidden; }
+    .project-group-header { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-md); cursor: pointer; }
+    .project-group-header:hover { background: var(--color-hover, rgba(0,0,0,0.03)); }
+    .expand-arrow { font-size: 10px; color: var(--color-text-muted); transition: transform 0.15s; width: 12px; flex-shrink: 0; }
+    .expand-arrow.open { transform: rotate(90deg); }
+    .project-group-name { font-weight: 600; font-size: var(--font-size-sm); color: var(--color-primary); white-space: nowrap; }
+    .project-group-meta { font-size: var(--font-size-xs); color: var(--color-text-muted); margin-left: auto; white-space: nowrap; }
+    .project-group-summary { padding: 0 var(--space-md) var(--space-md) calc(var(--space-md) + 12px + var(--space-sm)); font-size: var(--font-size-xs); color: var(--color-text-muted); line-height: 1.5; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
+    .project-group-sessions { border-top: 1px solid var(--color-border); }
+
+    .session-row { display: flex; align-items: center; gap: var(--space-sm); padding: var(--space-sm) var(--space-md); font-size: var(--font-size-sm); cursor: pointer; }
+    .session-row:hover { background: var(--color-hover, rgba(0,0,0,0.03)); }
+    .session-row:not(:last-child) { border-bottom: 1px solid var(--color-border-subtle, rgba(0,0,0,0.06)); }
+    .session-row-name { font-weight: 500; white-space: nowrap; min-width: 72px; }
+    .branch-tag { background: var(--color-border-light); padding: 1px 6px; border-radius: var(--radius-sm); font-family: var(--font-mono); font-size: var(--font-size-xs); color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100px; }
+    .session-row-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-text-secondary); font-size: var(--font-size-xs); }
+    .session-row-time { font-size: var(--font-size-xs); color: var(--color-text-muted); white-space: nowrap; }
+
+    .active-badge-sm {
+      display: inline-flex; align-items: center; gap: 3px;
+      padding: 1px 6px; border-radius: var(--radius-full);
+      font-size: var(--font-size-xs);
+      background: var(--color-working-bg); color: var(--color-working);
+    }
+    .active-dot-sm {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: var(--color-working);
+      animation: pulse 2s infinite;
+    }
+
     @media (max-width: 768px) {
       .card-grid {
         grid-template-columns: 1fr;
@@ -280,18 +330,43 @@ export class DashboardPage extends LitElement {
   }
 
   private async _fetchAll() {
-    const [procs, sessData, chatSess, usageData, quotaData] = await Promise.all([
+    const [procs, sessData, chatSess, agentsData, usageData, quotaData] = await Promise.all([
       api.getProcesses(),
       api.getSessions({ limit: "20" }),
       api.listChatSessions().catch(() => [] as ChatSessionInfo[]),
+      api.getAgents().catch(() => [] as AgentInfo[]),
       api.getUsage().catch(() => null),
       api.getQuota().catch(() => null),
     ]);
 
     this.processes = procs;
     this.chatSessions = chatSess;
+    this.agents = agentsData;
     this.usage = usageData;
     this.quota = quotaData;
+
+    // 获取 daemon agent 的远程进程和会话
+    const daemonAgents = agentsData.filter(a => a.mode === "daemon" && a.state === "connected");
+    if (daemonAgents.length > 0) {
+      const [processResults, sessionResults] = await Promise.all([
+        Promise.all(
+          daemonAgents.map(a =>
+            api.getAgentProcesses(a.agent_id)
+              .then(ps => [a.agent_id, ps] as [string, RemoteProcess[]])
+              .catch(() => [a.agent_id, []] as [string, RemoteProcess[]])
+          )
+        ),
+        Promise.all(
+          daemonAgents.map(a =>
+            api.getAgentSessions(a.agent_id)
+              .then(ss => [a.agent_id, ss] as [string, SessionSummary[]])
+              .catch(() => [a.agent_id, []] as [string, SessionSummary[]])
+          )
+        ),
+      ]);
+      this.agentProcesses = new Map(processResults);
+      this.agentSessions = new Map(sessionResults);
+    }
 
     const activeCwds = new Set(procs.map(p => p.cwd));
     const sessions = sessData.items.map(s => ({
@@ -326,18 +401,44 @@ export class DashboardPage extends LitElement {
     this.sessions = sessions;
   }
 
-  /** 轻量轮询：只刷新进程和 broker 会话状态 */
+  /** 轻量轮询：刷新进程、broker 会话和 agent 状态 */
   private async _pollActive() {
     const hasActive =
-      this.processes.length > 0 || this.chatSessions.length > 0;
+      this.processes.length > 0 || this.chatSessions.length > 0 || this.agents.length > 0;
     if (!hasActive) return;
     try {
-      const [procs, chatSess] = await Promise.all([
+      const [procs, chatSess, agentsData] = await Promise.all([
         api.getProcesses(),
         api.listChatSessions().catch(() => this.chatSessions),
+        api.getAgents().catch(() => this.agents),
       ]);
       this.processes = procs;
       this.chatSessions = chatSess;
+      this.agents = agentsData;
+
+      // 刷新 daemon agent 的远程进程和会话
+      const daemonAgents = agentsData.filter(a => a.mode === "daemon" && a.state === "connected");
+      if (daemonAgents.length > 0) {
+        const [processResults, sessionResults] = await Promise.all([
+          Promise.all(
+            daemonAgents.map(a =>
+              api.getAgentProcesses(a.agent_id)
+                .then(ps => [a.agent_id, ps] as [string, RemoteProcess[]])
+                .catch(() => [a.agent_id, []] as [string, RemoteProcess[]])
+            )
+          ),
+          Promise.all(
+            daemonAgents.map(a =>
+              api.getAgentSessions(a.agent_id)
+                .then(ss => [a.agent_id, ss] as [string, SessionSummary[]])
+                .catch(() => [a.agent_id, []] as [string, SessionSummary[]])
+            )
+          ),
+        ]);
+        this.agentProcesses = new Map(processResults);
+        this.agentSessions = new Map(sessionResults);
+      }
+
       const activeCwds = new Set(procs.map(p => p.cwd));
       this.sessions = this.sessions.map(s => ({
         ...s,
@@ -346,15 +447,24 @@ export class DashboardPage extends LitElement {
     } catch { /* 静默失败 */ }
   }
 
-  private _navToSession(sessionId: string, projectPath: string) {
+  private _navToSession(sessionId: string, projectPath: string, agentId?: string) {
     const encoded = projectPath.replace(/\//g, "-");
-    location.hash = `#/viewer/${encoded}/${sessionId}`;
+    const suffix = agentId ? `?agent=${agentId}` : "";
+    location.hash = `#/viewer/${encoded}/${sessionId}${suffix}`;
+  }
+
+  private async _killRemoteProcesses(agentId: string, pids: number[]) {
+    try {
+      await api.killAgentProcesses(agentId, pids);
+      await this._fetchAll();
+    } catch (err) {
+      console.error("清理进程失败:", err);
+    }
   }
 
   private async _stopSession(sessionId: string) {
     try {
       await api.stopChat(sessionId);
-      // 刷新列表
       await this._fetchAll();
     } catch (err) {
       console.error("停止会话失败:", err);
@@ -362,8 +472,10 @@ export class DashboardPage extends LitElement {
   }
 
   private async _onNewSession(e: CustomEvent<NewSessionConfig>) {
-    const { projectPath, name, ...launchConfig } = e.detail;
+    const { projectPath, name, agentId, ...launchConfig } = e.detail;
     this._newSessionOpen = false;
+    this._newSessionAgentId = "";
+    this._newSessionPath = "";
     this._newSessionStarting = true;
     try {
       const result = await api.startChat(projectPath, undefined, {
@@ -375,14 +487,12 @@ export class DashboardPage extends LitElement {
         appendSystemPrompt: launchConfig.appendSystemPrompt || undefined,
         addDirs: launchConfig.addDirs.length > 0 ? launchConfig.addDirs : undefined,
         name: name || undefined,
+        agentId: agentId || undefined,
       });
-      // 将 project_path 存入 sessionStorage，viewer 优先从这里读，
-      // 避免依赖 broker 会话在跳转后仍然在线
       sessionStorage.setItem(`cm_new_session:${result.session_id}`, result.project_path);
       sessionStorage.setItem(`cm_new_session_name:${result.session_id}`, result.name);
-      // 标记新建会话自动接入（viewer 检测到此标记后自动 attach）
       sessionStorage.setItem(`cm_new_session_autoattach:${result.session_id}`, "1");
-      this._navToSession(result.session_id, result.project_path);
+      this._navToSession(result.session_id, result.project_path, agentId || undefined);
     } catch (err) {
       console.error("新建会话失败:", err);
       this._newSessionError = err instanceof Error ? err.message : "启动失败，请检查日志";
@@ -390,20 +500,24 @@ export class DashboardPage extends LitElement {
     }
   }
 
+  private _toggleProject(projectPath: string) {
+    const next = new Set(this._expandedProjects);
+    if (next.has(projectPath)) next.delete(projectPath);
+    else next.add(projectPath);
+    this._expandedProjects = next;
+  }
+
   render() {
     if (this.loading) {
       return html`<div class="loading">加载中...</div>`;
     }
 
-    // broker 会话分类
+    // ── broker 会话分类 ──
     const pendingChatSessions  = this.chatSessions.filter(s => s.state === "waiting_permission");
     const streamingSessions    = this.chatSessions.filter(s => s.state === "streaming" || s.state === "starting");
     const idleSessions         = this.chatSessions.filter(s => s.state === "idle" || s.state === "disconnected");
-    const activeChatSessions   = [...streamingSessions, ...idleSessions]; // 用于排除最近会话
+    const activeChatSessions   = [...streamingSessions, ...idleSessions];
 
-    // JSONL 会话分类
-    // 工作中：broker 有 session_id 的 JSONL 会话（active/streaming/idle）
-    // 同时收集 claude_session_id（真实 JSONL ID），用于匹配新建会话
     const activeBrokerIds = new Set([
       ...activeChatSessions.map(s => s.session_id),
       ...activeChatSessions.map(s => s.claude_session_id).filter((id): id is string => !!id),
@@ -413,40 +527,133 @@ export class DashboardPage extends LitElement {
       ...pendingChatSessions.map(s => s.claude_session_id).filter((id): id is string => !!id),
     ]);
 
-    // 非 broker 管理的活跃进程（仅凭 cwd 匹配），按 cwd 去重，同项目只保留一个
+    // ── legacy 进程（本地非 broker 管理的） ──
     const brokerPaths = new Set(this.chatSessions.map(s => s.project_path));
     const legacyProcesses = this.processes
       .filter(p => !brokerPaths.has(p.cwd))
       .filter((p, i, arr) => arr.findIndex(q => q.cwd === p.cwd) === i);
 
-    // 每个 legacy 进程只"占用"该项目最新的一条 JSONL 会话（其余历史会话仍出现在最近会话）
-    const legacyMatchedIds = new Set(
-      legacyProcesses
-        .map(p => this.sessions.find(s => s.project_path === p.cwd)?.session_id)
-        .filter((id): id is string => id !== undefined)
-    );
+    // ── 远程非托管进程（按 agent+cwd 分组合并） ──
+    interface RemoteProcessGroup {
+      agent: AgentInfo;
+      cwd: string;
+      projectName: string;
+      pids: number[];
+      session: SessionSummary | null;
+      totalUptime: number;
+    }
+    const remoteStandbyGroups: RemoteProcessGroup[] = [];
+    for (const agent of this.agents) {
+      if (agent.state !== "connected") continue;
+      const procs = this.agentProcesses.get(agent.agent_id) || [];
+      const sessions = this.agentSessions.get(agent.agent_id) || [];
+      const sessionByPath = new Map<string, SessionSummary>();
+      for (const s of sessions) {
+        sessionByPath.set(s.project_path, s);
+      }
+      // 按 cwd 分组
+      const cwdMap = new Map<string, RemoteProcessGroup>();
+      for (const p of procs) {
+        // 跳过托管进程和无法识别路径的孤儿进程（cwd 不可读且无项目名）
+        if (!p.managed && (p.cwd || p.project_name)) {
+          const key = p.cwd || p.project_name || "";
+          let group = cwdMap.get(key);
+          if (!group) {
+            group = {
+              agent,
+              cwd: p.cwd,
+              projectName: p.project_name || "",
+              pids: [],
+              session: sessionByPath.get(p.cwd) || null,
+              totalUptime: 0,
+            };
+            cwdMap.set(key, group);
+          }
+          group.pids.push(p.pid);
+          group.totalUptime = Math.max(group.totalUptime, p.uptime_seconds);
+        }
+      }
+      remoteStandbyGroups.push(...cwdMap.values());
+    }
 
-    // 未被 broker 或 legacy 进程占用的会话，按 24h 拆分
+    // ── legacy 进程按 24h 分流 ──
     const now = Date.now();
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
+    const legacyStandby: ClaudeProcess[] = [];
+    const legacyRecent: ClaudeProcess[] = [];
+    const legacyStandbyMatchedIds = new Set<string>();
+
+    for (const p of legacyProcesses) {
+      const matched = this.sessions.find(s => s.project_path === p.cwd);
+      if (!matched) {
+        legacyStandby.push(p);
+        continue;
+      }
+      const endMs = matched.end_time ? new Date(matched.end_time).getTime() : 0;
+      if (endMs && (now - endMs) < TWENTY_FOUR_HOURS) {
+        legacyStandby.push(p);
+        legacyStandbyMatchedIds.add(matched.session_id);
+      } else {
+        legacyRecent.push(p);
+        // 不排除这些会话，让它们进入最近项目（带 is_active）
+      }
+    }
+
+    // ── JSONL 会话分流 ──
     const unclaimed = this.sessions.filter(
-      s => !legacyMatchedIds.has(s.session_id)
+      s => !legacyStandbyMatchedIds.has(s.session_id)
         && !activeBrokerIds.has(s.session_id)
         && !pendingBrokerIds.has(s.session_id)
     );
 
-    // 24h 内结束的会话 → 待命中
-    const standbyTimeSessions = unclaimed
-      .filter(s => s.end_time && (now - new Date(s.end_time).getTime()) < TWENTY_FOUR_HOURS)
-      .map(s => ({ ...s, is_active: false }));
-
-    // 超过 24h 或无结束时间 → 最近会话
+    // 所有 unclaimed JSONL 会话 → 最近项目（不再区分 24h）
     const recentSessions = unclaimed
-      .filter(s => !s.end_time || (now - new Date(s.end_time).getTime()) >= TWENTY_FOUR_HOURS)
       .map(s => ({ ...s, is_active: false }));
 
-    const hasRefreshBtn = pendingChatSessions.length === 0 && streamingSessions.length === 0 && legacyProcesses.length === 0;
+    // legacyRecent 匹配的会话需要标记 is_active
+    const legacyRecentPaths = new Set(legacyRecent.map(p => p.cwd));
+    const allRecentSessions = recentSessions.map(s => ({
+      ...s,
+      is_active: s.is_active || legacyRecentPaths.has(s.project_path),
+    }));
+
+    // ── 最近项目分组 ──
+    const projectMap = new Map<string, ProjectGroup>();
+    for (const s of allRecentSessions) {
+      let group = projectMap.get(s.project_path);
+      if (!group) {
+        group = {
+          projectPath: s.project_path,
+          projectName: s.project_name,
+          sessions: [],
+          latestEndTime: s.end_time || "",
+          hasActiveProcess: s.is_active,
+        };
+        projectMap.set(s.project_path, group);
+      }
+      group.sessions.push(s);
+      if (s.end_time && s.end_time > group.latestEndTime) {
+        group.latestEndTime = s.end_time;
+      }
+      if (s.is_active) group.hasActiveProcess = true;
+    }
+    const projectGroups = [...projectMap.values()]
+      .sort((a, b) => b.latestEndTime.localeCompare(a.latestEndTime));
+
+    // ── 待命中总数 ──
+    const standbyCount = idleSessions.length + legacyStandby.length
+      + remoteStandbyGroups.length;
+
+    // ── 是否显示机器 badge（>= 2 个 agent 时显示） ──
+    const showMachineBadge = this.agents.length >= 2;
+    const agentNameMap = new Map<string, string>();
+    for (const a of this.agents) {
+      agentNameMap.set(a.agent_id, a.display_name || a.hostname);
+    }
+
+    const hasRefreshBtn = pendingChatSessions.length === 0
+      && streamingSessions.length === 0 && legacyStandby.length === 0;
 
     return html`
       <!-- 页面标题 + 新建按钮 -->
@@ -465,7 +672,9 @@ export class DashboardPage extends LitElement {
       <!-- 新建会话对话框 -->
       <cm-new-session-dialog
         .open=${this._newSessionOpen}
-        @cancel=${() => { this._newSessionOpen = false; }}
+        .initialAgentId=${this._newSessionAgentId}
+        .initialPath=${this._newSessionPath}
+        @cancel=${() => { this._newSessionOpen = false; this._newSessionAgentId = ""; this._newSessionPath = ""; }}
         @start=${this._onNewSession}
       ></cm-new-session-dialog>
 
@@ -495,7 +704,6 @@ export class DashboardPage extends LitElement {
           </div>
           <div class="card-grid">
             ${pendingChatSessions.map(cs => {
-              // 尝试从 JSONL 会话列表里匹配完整摘要
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
               const projectName = matched?.project_name ?? cs.project_path.split("/").pop() ?? cs.project_path;
               return html`
@@ -508,7 +716,7 @@ export class DashboardPage extends LitElement {
                 >
                   <div class="pending-card-header">
                     <span class="pending-badge">待审批</span>
-                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
+                    ${showMachineBadge && cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${agentNameMap.get(cs.agent_id || "") || cs.hostname}</span>` : nothing}
                     ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
                     <span class="pending-project" title=${cs.project_path}>${projectName}</span>
                   </div>
@@ -523,7 +731,7 @@ export class DashboardPage extends LitElement {
         </div>
       ` : nothing}
 
-      <!-- 工作中：仅 broker streaming/starting 会话（agent 正在执行命令） -->
+      <!-- 工作中 -->
       ${streamingSessions.length > 0 ? html`
         <div class="section">
           <div class="section-title">
@@ -535,7 +743,7 @@ export class DashboardPage extends LitElement {
           <div class="card-grid">
             ${streamingSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || matched.name || ""} .machineName=${cs.source === "remote" ? (agentNameMap.get(cs.agent_id || "") || cs.hostname || "") : "本机"}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
               return html`
                 <div
@@ -547,7 +755,7 @@ export class DashboardPage extends LitElement {
                 >
                   <div class="pending-card-header">
                     <span class="pending-badge" style="background:var(--color-working-bg);color:var(--color-working)">工作中</span>
-                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
+                    ${showMachineBadge && cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${agentNameMap.get(cs.agent_id || "") || cs.hostname}</span>` : nothing}
                     ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
                     <span class="pending-project">${projectName}</span>
                   </div>
@@ -558,73 +766,135 @@ export class DashboardPage extends LitElement {
         </div>
       ` : nothing}
 
-      <!-- 待命中：broker idle 会话 + legacy 进程 + 24h 内结束的会话 -->
-      ${(idleSessions.length > 0 || legacyProcesses.length > 0 || standbyTimeSessions.length > 0) ? html`
+      <!-- 待命中：broker idle + legacyStandby + remoteStandby + 24h 内 JSONL 会话 -->
+      ${standbyCount > 0 ? html`
         <div class="section">
           <div class="section-title">
             <span class="status-dot dot-standby"></span>
             待命中
-            <span class="count">(${idleSessions.length + legacyProcesses.length + standbyTimeSessions.length})</span>
+            <span class="count">(${standbyCount})</span>
             <button class="refresh-btn" @click=${this._fetchAll.bind(this)}>刷新</button>
           </div>
           <div class="card-grid">
             ${idleSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
+              const data = matched
+                ? { ...matched, is_active: false }
+                : {
+                    session_id: cs.session_id,
+                    project_path: cs.project_path,
+                    project_name: projectName,
+                    first_message: "",
+                    last_assistant_text: "",
+                    user_turns: 0,
+                    tool_use_count: 0,
+                    message_count: 0,
+                    start_time: "",
+                    end_time: "",
+                    git_branch: "",
+                    is_active: false,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    name: cs.name || "",
+                  };
+              const machine = cs.source === "remote"
+                ? (agentNameMap.get(cs.agent_id || "") || cs.hostname || "")
+                : "本机";
+              return html`<cm-session-card
+                .data=${data}
+                .brokerName=${cs.name || matched?.name || ""}
+                .machineName=${machine}
+              ></cm-session-card>`;
+            })}
+            ${legacyStandby.map(p => {
+              const matched = this.sessions.find(s => s.project_path === p.cwd);
+              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""} .machineName=${"本机"}></cm-session-card>`;
+              return html`<cm-process-card .data=${p}></cm-process-card>`;
+            })}
+            ${remoteStandbyGroups.map((group) => {
+              const machine = agentNameMap.get(group.agent.agent_id) || group.agent.hostname;
+              if (group.session && group.pids.length === 1) {
+                // 单个进程有匹配 JSONL 会话 → session-card
+                return html`<cm-session-card
+                  .data=${{ ...group.session, is_active: true }}
+                  .brokerName=${group.session.name || ""}
+                  .machineName=${machine}
+                  @click=${(e: Event) => { e.preventDefault(); this._navToSession(group.session!.session_id, group.session!.project_path, group.agent.agent_id); }}
+                ></cm-session-card>`;
+              }
+              // 多进程或无会话 → 合并卡片
+              const projectName = group.projectName || (group.cwd ? group.cwd.split("/").pop() : "") || "未知路径";
               return html`
-                <div
-                  class="pending-card"
-                  style="border-color: var(--color-standby)"
-                  role="button"
-                  tabindex="0"
-                  @click=${() => this._navToSession(cs.session_id, cs.project_path)}
-                >
+                <div class="pending-card" style="border-color: var(--color-standby)">
                   <div class="pending-card-header">
                     <span class="pending-badge" style="background:var(--color-standby-bg);color:var(--color-standby)">待命中</span>
-                    ${cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${cs.hostname}</span>` : nothing}
-                    ${cs.state === "disconnected" ? html`<span class="disconnected-badge">${cs.source === "remote" ? "agent 断线，等待重连…" : "已断开"}</span>` : nothing}
-                    ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
+                    ${machine ? html`<span class="remote-badge">${machine}</span>` : nothing}
                     <span class="pending-project">${projectName}</span>
-                    ${cs.source !== "remote" ? html`
-                      <button
-                        class="stop-btn"
-                        title="停止此会话"
-                        @click=${(e: Event) => {
-                          e.stopPropagation();
-                          this._stopSession(cs.session_id);
-                        }}
-                      >✕</button>
-                    ` : nothing}
+                    ${group.pids.length > 1 ? html`<span class="count">${group.pids.length} 个孤儿进程</span>` : nothing}
+                    <button
+                      class="stop-btn"
+                      title="清理${group.pids.length > 1 ? `这 ${group.pids.length} 个` : "此"}孤儿进程"
+                      @click=${(e: Event) => {
+                        e.stopPropagation();
+                        this._killRemoteProcesses(group.agent.agent_id, group.pids);
+                      }}
+                    >清理</button>
                   </div>
-                  <div class="pending-hint">${cs.project_path}</div>
+                  <div class="pending-hint">${group.cwd || "路径不可读"} · 运行 ${formatUptime(Math.round(group.totalUptime))}</div>
                 </div>
               `;
             })}
-            ${legacyProcesses.map(p => {
-              const matched = this.sessions.find(s => s.project_path === p.cwd);
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""}></cm-session-card>`;
-              return html`<cm-process-card .data=${p}></cm-process-card>`;
-            })}
-            ${standbyTimeSessions.map(s => html`<cm-session-card .data=${s} .brokerName=${s.name || ""}></cm-session-card>`)}
           </div>
         </div>
       ` : nothing}
 
-      <!-- 最近会话 -->
+      <!-- 最近项目 -->
       <div class="section">
         <div class="section-title">
           <span class="status-dot dot-recent"></span>
-          最近会话
-          <span class="count">(${recentSessions.length})</span>
+          最近项目
+          <span class="count">(${projectGroups.length})</span>
           ${hasRefreshBtn ? html`
             <button class="refresh-btn" @click=${this._load.bind(this)}>刷新</button>
           ` : nothing}
         </div>
-        ${recentSessions.length > 0
-          ? html`<div class="card-grid">${recentSessions.map(s => html`<cm-session-card .data=${s} .brokerName=${s.name || ""}></cm-session-card>`)}</div>`
-          : html`<div class="empty">暂无会话记录</div>`
-        }
+        ${projectGroups.length > 0 ? html`
+          <div class="project-list">
+            ${projectGroups.map(group => {
+              const expanded = this._expandedProjects.has(group.projectPath);
+              const latest = group.sessions[0];
+              return html`
+                <div class="project-group">
+                  <div class="project-group-header" @click=${() => this._toggleProject(group.projectPath)}>
+                    <span class="expand-arrow ${expanded ? 'open' : ''}">▶</span>
+                    <span class="project-group-name">${group.projectName}</span>
+                    ${group.hasActiveProcess ? html`<span class="active-badge-sm"><span class="active-dot-sm"></span>运行中</span>` : nothing}
+                    <span class="project-group-meta">
+                      ${group.sessions.length} 个会话 · ${group.latestEndTime ? timeAgo(group.latestEndTime) : ""}
+                    </span>
+                  </div>
+                  ${!expanded ? html`
+                    <div class="project-group-summary">${latest?.first_message || ""}</div>
+                  ` : nothing}
+                  ${expanded ? html`
+                    <div class="project-group-sessions">
+                      ${group.sessions.map(s => html`
+                        <div class="session-row" @click=${() => this._navToSession(s.session_id, s.project_path)}>
+                          <span class="session-row-name">${s.name || ""}</span>
+                          ${s.git_branch ? html`<span class="branch-tag">${s.git_branch}</span>` : nothing}
+                          <span class="session-row-msg">${s.first_message || ""}</span>
+                          <span class="session-row-time">${s.end_time ? timeAgo(s.end_time) : ""}</span>
+                          ${s.is_active ? html`<span class="active-badge-sm"><span class="active-dot-sm"></span></span>` : nothing}
+                        </div>
+                      `)}
+                    </div>
+                  ` : nothing}
+                </div>
+              `;
+            })}
+          </div>
+        ` : html`<div class="empty">暂无会话记录</div>`}
       </div>
     `;
   }

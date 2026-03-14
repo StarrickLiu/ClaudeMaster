@@ -2,6 +2,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { SessionSummary } from "../api.js";
+import { formatTokens } from "../utils/format.js";
 
 @customElement("cm-session-summary")
 export class SessionSummaryCard extends LitElement {
@@ -57,11 +58,6 @@ export class SessionSummaryCard extends LitElement {
     if (!s) return nothing;
 
     const totalTokens = s.total_input_tokens + s.total_output_tokens;
-    const formatTokens = (n: number) => {
-      if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-      if (n >= 1000) return `${(n / 1000).toFixed(0)}K`;
-      return `${n}`;
-    };
 
     return html`
       <div class="summary-card">

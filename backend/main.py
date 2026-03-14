@@ -37,22 +37,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from config import AUTH_TOKEN
-from routers import projects, sessions, processes, history, diff, chat, usage
+from config import AUTH_TOKEN, APP_VERSION
+from routers import projects, sessions, processes, history, diff, chat, usage, agents
 from ws.handler import router as ws_router, init_chat_handler
 from ws.agent_handler import router as agent_ws_router, init_agent_handler
+from services.agent_config import AgentConfigStore
 from services.claude_broker import broker
 from services.client_hub import ClientHub
 from services.session_registry import SessionRegistry
 
 # 实例化多客户端架构组件
-client_hub = ClientHub()
+agent_config = AgentConfigStore()
+client_hub = ClientHub(agent_config=agent_config)
 registry = SessionRegistry(broker, client_hub)
 
 # 注入依赖到各模块
 init_chat_handler(registry)
 init_agent_handler(client_hub)
 chat.init_chat_router(registry)
+agents.init_agents_router(client_hub, agent_config, broker)
 
 
 @asynccontextmanager
@@ -63,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 app = FastAPI(
     title="ClaudeMaster",
-    version="0.3.0",
+    version=APP_VERSION,
     description="Claude Code Web 管理平台",
     lifespan=lifespan,
 )
@@ -77,12 +80,14 @@ app.add_middleware(
 
 
 if AUTH_TOKEN:
+    from starlette.responses import JSONResponse
+
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):  # type: ignore[override]
             if request.url.path.startswith("/api/"):
                 token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
                 if token != AUTH_TOKEN:
-                    raise HTTPException(status_code=401, detail="未授权")
+                    return JSONResponse(status_code=401, content={"detail": "未授权"})
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)
@@ -94,6 +99,7 @@ app.include_router(history.router, prefix="/api")
 app.include_router(diff.router, prefix="/api")
 app.include_router(chat.router, prefix="/api")
 app.include_router(usage.router, prefix="/api")
+app.include_router(agents.router, prefix="/api")
 app.include_router(ws_router)
 app.include_router(agent_ws_router)
 

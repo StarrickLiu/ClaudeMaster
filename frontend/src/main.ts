@@ -1,17 +1,16 @@
 // 应用启动：注册路由、挂载导航
 import { router } from "./router.js";
+import { getTheme, applyTheme } from "./utils/theme.js";
 import "./components/nav-bar.js";
 import "./pages/dashboard.js";
 import "./pages/sessions.js";
 import "./pages/viewer.js";
 import "./pages/settings.js";
 import "./pages/docs.js";
+import "./pages/agents.js";
 
 // 初始化主题（尽早执行，避免浅色闪烁）
-const savedTheme = localStorage.getItem("cm_theme");
-if (savedTheme === "dark") {
-  document.documentElement.setAttribute("data-theme", "dark");
-}
+applyTheme(getTheme());
 
 const app = document.getElementById("app")!;
 
@@ -21,6 +20,7 @@ const activeMap: Record<string, string> = {
   "cm-sessions": "sessions",
   "cm-viewer": "",
   "cm-settings": "settings",
+  "cm-agents": "agents",
   "cm-docs": "docs",
 };
 
@@ -56,6 +56,7 @@ function setPage(tagName: string, attrs: Record<string, string> = {}) {
 router.add("/dashboard", () => setPage("cm-dashboard"));
 router.add("/sessions", () => setPage("cm-sessions"));
 router.add("/settings", () => setPage("cm-settings"));
+router.add("/agents", () => setPage("cm-agents"));
 router.add("/docs", () => setPage("cm-docs", { page: "overview" }));
 router.add("/docs/:page", (params) => setPage("cm-docs", { page: params["page"] }));
 router.add("/viewer/:project/:sessionId", (params) =>

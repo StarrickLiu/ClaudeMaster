@@ -1,5 +1,5 @@
-// 待命中进程卡片组件（非 broker 管理的 Claude 进程）
-import { LitElement, html, css } from "lit";
+// 待命中进程卡片组件（本地或远程非 broker 管理的 Claude 进程）
+import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { ClaudeProcess } from "../api.js";
 import { formatDuration } from "../utils/time.js";
@@ -7,6 +7,8 @@ import { formatDuration } from "../utils/time.js";
 @customElement("cm-process-card")
 export class ProcessCard extends LitElement {
   @property({ type: Object }) data!: ClaudeProcess;
+  /** 可选：所在机器名称，有值时显示 badge */
+  @property() machineName = "";
 
   static styles = css`
     :host {
@@ -70,6 +72,19 @@ export class ProcessCard extends LitElement {
     .meta-item {
       font-family: var(--font-mono);
     }
+
+    .machine-badge {
+      background: var(--color-primary-bg, #dbeafe);
+      color: var(--color-primary, #2563eb);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 160px;
+    }
   `;
 
   private _handleClick() {
@@ -89,6 +104,7 @@ export class ProcessCard extends LitElement {
       <div class="card" @click=${this._handleClick}>
         <div class="header">
           <span class="project-name">${d.project_name || "未知项目"}</span>
+          ${this.machineName ? html`<span class="machine-badge" title=${this.machineName}>${this.machineName}</span>` : nothing}
           <span class="status"><span class="dot"></span>待命中</span>
         </div>
         <div class="meta">

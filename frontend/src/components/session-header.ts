@@ -418,8 +418,6 @@ export class SessionHeader extends LitElement {
             >
               接入会话
             </button>`
-          : this.source === "remote"
-          ? nothing
           : html`<button
               class="resume-btn"
               @click=${() => { this._configOpen = true; }}

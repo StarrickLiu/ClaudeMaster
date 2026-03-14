@@ -42,3 +42,7 @@ ClaudeMaster 是一个个人使用的 Web 端 Claude Code CLI 管理平台。
 - Broker 会话有双 ID：`session_id`（initial_id，稳定标识，用于 URL/WS/broker 查找）和 `claude_session_id`（Claude 真实 ID，用于 JSONL 加载）。前端 viewer 用 `_resolveSessionId()` 选择正确 ID
 - Viewer 打开时不自动连接 broker，需用户手动点击「接入会话」或「恢复会话」。唯一例外：dashboard 新建会话通过 sessionStorage 标记自动接入
 - 每个 Broker 会话存储 `launch_config`（启动参数），前端可查看配置摘要和预填充恢复对话框
+
+## 工作流程
+- 准备更改前，先详细说明想法、确定方案、说明改进后的效果，等用户同意后再动手实现
+- 每次代码实现完毕后，以产品经理视角审查前端/平台效果，思考哪里可以改进，并给出下一步改进计划

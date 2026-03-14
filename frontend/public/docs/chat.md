@@ -7,14 +7,16 @@ ClaudeMaster 不仅能查看历史对话，还能从浏览器直接与 Claude Co
 用户从工作台或会话历史页点击「+ 新建会话」：
 
 1. 弹出配置对话框，可设置：
+   - **运行位置** — 本机或远程 agent（选择远程时需指定 agent）
    - **项目目录** — Claude Code 的工作目录
+   - **会话名称** — 自定义名称（留空自动生成 Docker 风格名称）
    - **模型** — 使用的 Claude 模型
    - **权限模式** — `bypassPermissions`（自动批准）或手动审批
    - **预算上限** — 最大花费（USD）
    - **最大轮数** — 自动停止的对话轮数
    - **追加系统提示** — 附加到 Claude 系统提示的自定义指令
    - **额外目录** — 多项目上下文
-2. 后端 `POST /api/chat/start` 启动 Claude Code 子进程
+2. 后端 `POST /api/chat/start` 启动本地子进程或向远程 agent 发送启动命令
 3. 返回 `session_id` 后，前端跳转到对话查看器
 4. 通过 WebSocket `/ws/chat/{session_id}` 建立实时通信
 

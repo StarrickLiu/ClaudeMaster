@@ -12,6 +12,7 @@ import {
   type ToolActivity,
 } from "../services/chat-client.js";
 import type { LaunchConfig } from "../components/launch-config-dialog.js";
+import { toolDescription } from "../utils/format.js";
 import "../components/message-bubble.js";
 import "../components/tool-call.js";
 import "../components/thinking-block.js";
@@ -42,6 +43,8 @@ function generateUUID(): string {
 export class ViewerPage extends LitElement {
   @property() sessionId = "";
   @property() project = "";
+  /** 远程 agent ID（从 URL ?agent=xxx 解析），有值时通过远程 API 加载 */
+  @state() private _agentId = "";
 
   @state() data: SessionDetail | null = null;
   @state() loading = true;
@@ -71,6 +74,8 @@ export class ViewerPage extends LitElement {
   @state() toolActivities: ToolActivity[] = [];
   @state() private _promptTooLong = false;
   @state() private _compacting = false;
+  @state() private _heartbeatStale = false;
+  @state() private _streamingSince = 0;
 
   private chatClient: ChatClient | null = null;
   /** 本次会话中用户选择"始终允许"的工具集合，自动通过同名工具请求 */
@@ -505,6 +510,11 @@ export class ViewerPage extends LitElement {
   private async _load() {
     this.loading = true;
 
+    // 解析 URL 中的 ?agent=xxx 参数
+    const hashQuery = location.hash.split("?")[1] || "";
+    const urlParams = new URLSearchParams(hashQuery);
+    this._agentId = urlParams.get("agent") || "";
+
     // 优先检查 sessionStorage（新建会话时 dashboard 会提前写入）
     const storedPath = sessionStorage.getItem(`cm_new_session:${this.sessionId}`);
     if (storedPath) {
@@ -533,11 +543,17 @@ export class ViewerPage extends LitElement {
         if (activeBroker.claude_session_id) {
           this.brokerSessionId = activeBroker.claude_session_id;
         }
+        // 从 broker 会话自动识别远程 agentId（URL 没有 ?agent= 时也能正确识别）
+        if (!this._agentId && activeBroker.source === "remote" && activeBroker.agent_id) {
+          this._agentId = activeBroker.agent_id;
+        }
       }
 
       // 用最佳 ID 加载 JSONL（brokerSessionId > URL sessionId）
       const jsonlId = this.brokerSessionId || this.sessionId;
-      const session = await api.getSession(jsonlId, this.project).catch(() => null);
+      const session = this._agentId
+        ? await api.getAgentSessionDetail(this._agentId, jsonlId).catch(() => null)
+        : await api.getSession(jsonlId, this.project).catch(() => null);
 
       if (session) {
         this.data = session;
@@ -576,7 +592,9 @@ export class ViewerPage extends LitElement {
   private async _reload() {
     const sid = this._resolveSessionId();
     try {
-      const fresh = await api.getSession(sid, this.project);
+      const fresh = this._agentId
+        ? await api.getAgentSessionDetail(this._agentId, sid)
+        : await api.getSession(sid, this.project);
       this.data = fresh;
       this._buildToolResultMap();
     } catch (e) {
@@ -643,7 +661,7 @@ export class ViewerPage extends LitElement {
   }
 
   private async _loadDiff() {
-    if (!this.data) return;
+    if (!this.data || this._agentId) return;
     const projectPath = this.data.summary.project_path;
     this.diffLoading = true;
     this.commitsLoading = true;
@@ -725,7 +743,10 @@ export class ViewerPage extends LitElement {
           maxTurns: config.maxTurns ?? undefined,
           appendSystemPrompt: config.appendSystemPrompt || undefined,
           addDirs: config.addDirs.length > 0 ? config.addDirs : undefined,
-        } : undefined
+          agentId: this._agentId || undefined,
+        } : {
+          agentId: this._agentId || undefined,
+        }
       );
       // 优先用真实 Claude session_id（与 JSONL 一致），否则用 initial_id
       this.brokerSessionId = result.claude_session_id || result.session_id;
@@ -755,6 +776,16 @@ export class ViewerPage extends LitElement {
       if (s === "streaming" && this.pendingPermission) {
         this.pendingPermission = null;
       }
+      // 记录 streaming 开始时间（用于显示等待时长）
+      if (s === "streaming" || s === "starting") {
+        if (!this._streamingSince) this._streamingSince = Date.now();
+      } else {
+        this._streamingSince = 0;
+      }
+    });
+
+    c.on("heartbeat", (info) => {
+      this._heartbeatStale = info.stale;
     });
 
     c.on("text-delta", (text) => {
@@ -815,7 +846,7 @@ export class ViewerPage extends LitElement {
       // 检测 "Prompt is too long" 错误
       const isError = !!(evt as Record<string, unknown>)["is_error"];
       const resultText = String((evt as Record<string, unknown>)["result"] ?? "");
-      if (isError && resultText.includes("Prompt is too long") || this.streamingText.includes("Prompt is too long")) {
+      if ((isError && resultText.includes("Prompt is too long")) || this.streamingText.includes("Prompt is too long")) {
         this._promptTooLong = true;
       }
 
@@ -1031,27 +1062,6 @@ export class ViewerPage extends LitElement {
     return icons[name] ?? "🔧";
   }
 
-  /** 从工具 input 提取简短描述 */
-  private _toolDesc(name: string, input: Record<string, unknown>): string {
-    const s = (v: unknown) => String(v ?? "").slice(0, 80);
-    switch (name) {
-      case "Bash":        return s(input["command"]);
-      case "Read":        return s(input["file_path"]);
-      case "Write":       return s(input["file_path"]);
-      case "Edit":        return s(input["file_path"]);
-      case "MultiEdit":   return s(input["file_path"]);
-      case "NotebookEdit":return s(input["notebook_path"]);
-      case "NotebookRead":return s(input["notebook_path"]);
-      case "Glob":        return s(input["pattern"]);
-      case "Grep":        return `"${s(input["pattern"])}"${input["path"] ? ` in ${s(input["path"])}` : ""}`;
-      case "WebFetch":    return s(input["url"]);
-      case "WebSearch":   return s(input["query"]);
-      case "Task":        return s(input["description"]);
-      case "LS":          return s(input["path"]);
-      default:            return "";
-    }
-  }
-
   private _renderConversation(s: SessionDetail["summary"]) {
     const allMessages = this.data!.messages;
     const total = allMessages.length;
@@ -1125,7 +1135,7 @@ export class ViewerPage extends LitElement {
               <div class="activity-items">
                 ${this.toolActivities.map((a) => {
                   const icon = this._toolIcon(a.toolName);
-                  const desc = this._toolDesc(a.toolName, a.input);
+                  const desc = toolDescription(a.toolName, a.input);
                   const ts = new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
                   return html`
                     <div class="activity-item ${a.complete ? "" : "pending"}">
@@ -1308,6 +1318,7 @@ export class ViewerPage extends LitElement {
       is_active: true,
       total_input_tokens: 0,
       total_output_tokens: 0,
+      name: this._sessionName || "",
     };
 
     return html`
@@ -1326,22 +1337,24 @@ export class ViewerPage extends LitElement {
         @rename=${this._onRename}
       ></cm-session-header>
 
-      <div class="tabs">
-        <button
-          class="tab"
-          ?data-active=${this.activeTab === "conversation"}
-          @click=${() => this._switchTab("conversation")}
-        >
-          对话
-        </button>
-        <button
-          class="tab"
-          ?data-active=${this.activeTab === "diff"}
-          @click=${() => this._switchTab("diff")}
-        >
-          代码变更
-        </button>
-      </div>
+      ${this._agentId ? nothing : html`
+        <div class="tabs">
+          <button
+            class="tab"
+            ?data-active=${this.activeTab === "conversation"}
+            @click=${() => this._switchTab("conversation")}
+          >
+            对话
+          </button>
+          <button
+            class="tab"
+            ?data-active=${this.activeTab === "diff"}
+            @click=${() => this._switchTab("diff")}
+          >
+            代码变更
+          </button>
+        </div>
+      `}
 
       ${this.activeTab === "conversation"
         ? html`
@@ -1351,6 +1364,8 @@ export class ViewerPage extends LitElement {
             ${this.chatMode
               ? html`<cm-chat-input
                   .chatState=${this.chatState}
+                  .heartbeatStale=${this._heartbeatStale}
+                  .streamingSince=${this._streamingSince}
                   @send-message=${this._onSendMessage}
                   @interrupt=${this._onInterrupt}
                 ></cm-chat-input>`

@@ -3,6 +3,7 @@ import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { SessionSummary } from "../api.js";
 import { timeAgo } from "../utils/time.js";
+import { formatTokens } from "../utils/format.js";
 
 @customElement("cm-session-card")
 export class SessionCard extends LitElement {
@@ -10,6 +11,8 @@ export class SessionCard extends LitElement {
   @property({ type: Boolean }) showProject = true;
   @property() reviewStat = "";
   @property() brokerName = "";
+  /** 远程机器名（显示为 badge，与会话名分开） */
+  @property() machineName = "";
 
   static styles = css`
     :host {
@@ -41,8 +44,9 @@ export class SessionCard extends LitElement {
 
     .header {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
+      gap: var(--space-sm);
       margin-bottom: var(--space-sm);
     }
 
@@ -50,6 +54,7 @@ export class SessionCard extends LitElement {
       display: flex;
       align-items: center;
       gap: var(--space-sm);
+      flex-wrap: wrap;
       min-width: 0;
     }
 
@@ -57,18 +62,12 @@ export class SessionCard extends LitElement {
       font-size: var(--font-size-sm);
       font-weight: 600;
       color: var(--color-primary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     .session-name {
       font-size: var(--font-size-sm);
       font-weight: 500;
       color: var(--color-text-secondary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     .name-sep {
@@ -85,15 +84,13 @@ export class SessionCard extends LitElement {
       font-size: var(--font-size-xs);
       color: var(--color-text-muted);
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 120px;
     }
 
     .time {
       font-size: var(--font-size-xs);
       color: var(--color-text-muted);
       white-space: nowrap;
+      flex-shrink: 0;
     }
 
     .topic {
@@ -121,11 +118,25 @@ export class SessionCard extends LitElement {
       border-left: 2px solid var(--color-border);
     }
 
+    .footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--space-sm);
+    }
+
     .metrics {
       display: flex;
       gap: var(--space-md);
       align-items: center;
       flex-wrap: wrap;
+    }
+
+    .badges {
+      display: flex;
+      gap: var(--space-sm);
+      align-items: center;
+      flex-shrink: 0;
     }
 
     .metric {
@@ -164,6 +175,16 @@ export class SessionCard extends LitElement {
       animation: pulse 2s infinite;
     }
 
+    .machine-badge {
+      background: var(--color-primary-bg, #dbeafe);
+      color: var(--color-primary, #2563eb);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: var(--radius-sm);
+      white-space: nowrap;
+    }
+
     @keyframes pulse {
       0%, 100% { opacity: 1; }
       50% { opacity: 0.4; }
@@ -178,12 +199,6 @@ export class SessionCard extends LitElement {
 
   private _getEncodedProject(): string {
     return this.data.project_path.replace(/\//g, "-");
-  }
-
-  private _formatTokens(tokens: number): string {
-    if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-    if (tokens >= 1000) return `${(tokens / 1000).toFixed(0)}K`;
-    return `${tokens}`;
   }
 
   render() {
@@ -211,28 +226,35 @@ export class SessionCard extends LitElement {
           ? html`<div class="progress">${d.last_assistant_text}</div>`
           : nothing}
 
-        <div class="metrics">
-          <span class="metric">
-            <span class="metric-icon">💬</span> ${d.user_turns} 轮对话
-          </span>
-          ${d.tool_use_count > 0
-            ? html`<span class="metric">
-                <span class="metric-icon">🔧</span> ${d.tool_use_count} 次工具
-              </span>`
-            : nothing}
-          ${totalTokens > 0
-            ? html`<span class="metric">
-                <span class="metric-icon">📊</span> ${this._formatTokens(totalTokens)} tokens
-              </span>`
-            : nothing}
-          ${this.reviewStat
-            ? html`<span class="metric metric-review">
-                <span class="metric-icon">📋</span> ${this.reviewStat}
-              </span>`
-            : nothing}
-          ${d.is_active
-            ? html`<span class="active-badge"><span class="active-dot"></span>运行中</span>`
-            : nothing}
+        <div class="footer">
+          <div class="metrics">
+            <span class="metric">
+              <span class="metric-icon">💬</span> ${d.user_turns} 轮对话
+            </span>
+            ${d.tool_use_count > 0
+              ? html`<span class="metric">
+                  <span class="metric-icon">🔧</span> ${d.tool_use_count} 次工具
+                </span>`
+              : nothing}
+            ${totalTokens > 0
+              ? html`<span class="metric">
+                  <span class="metric-icon">📊</span> ${formatTokens(totalTokens)} tokens
+                </span>`
+              : nothing}
+            ${this.reviewStat
+              ? html`<span class="metric metric-review">
+                  <span class="metric-icon">📋</span> ${this.reviewStat}
+                </span>`
+              : nothing}
+          </div>
+          <div class="badges">
+            ${this.machineName
+              ? html`<span class="machine-badge">${this.machineName}</span>`
+              : nothing}
+            ${d.is_active
+              ? html`<span class="active-badge"><span class="active-dot"></span>运行中</span>`
+              : nothing}
+          </div>
         </div>
       </div>
     `;

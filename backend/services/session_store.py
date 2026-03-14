@@ -371,6 +371,47 @@ async def get_session_detail(session_id: str, project_encoded: str) -> SessionDe
     return await asyncio.to_thread(_load)
 
 
+def parse_raw_jsonl_to_detail(
+    raw_jsonl: str,
+    session_id: str,
+    project_path: str,
+) -> SessionDetail | None:
+    """将原始 JSONL 文本（从远程 agent 获取）解析为 SessionDetail。"""
+    import io
+
+    messages: list[dict[str, Any]] = []
+    for line in io.StringIO(raw_jsonl):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg_type = obj.get("type", "")
+        if msg_type in SKIP_TYPES:
+            continue
+        if obj.get("isSidechain", False):
+            continue
+        messages.append(obj)
+
+    if not messages:
+        return None
+
+    merged = _merge_assistant_blocks(messages)
+    parsed = [_raw_to_message(m) for m in merged]
+
+    project_name = Path(project_path).name
+    resume_id = None
+    for m in messages[:5]:
+        if sid := m.get("sessionId"):
+            resume_id = sid
+            break
+
+    summary = _build_summary(session_id, project_path, project_name, messages, resume_session_id=resume_id)
+    return SessionDetail(summary=summary, messages=parsed)
+
+
 def extract_modified_files(session_id: str) -> list[str]:
     """从会话 JSONL 中提取被 Write/Edit 等工具修改的文件绝对路径。"""
     path = _find_session_file(session_id)
