@@ -51,7 +51,27 @@ make dev  # 后端 :8420 (uvicorn --reload) + 前端 :5173 (Vite HMR)
 | `make test-backend` | 仅后端测试 |
 | `make test-frontend` | 仅前端测试 |
 
+## 工程配置
+
+| 工具 | 配置文件 | 说明 |
+|------|---------|------|
+| Ruff | `ruff.toml` | Python 代码检查（line-length=120, py312） |
+| ESLint | `frontend/eslint.config.mjs` | TypeScript 代码检查（flat config） |
+| TypeScript | `frontend/tsconfig.json` | 严格模式，ES2022 |
+| Vite | `frontend/vite.config.ts` | 开发代理、构建输出 |
+| pytest | `backend/pytest.ini` | 测试配置 |
+
 ## 更新日志
+
+### 2026-03-14
+- 全面代码重构：62 个问题修复
+- 提取 BaseSession 基类，统一本地/远程会话接口
+- Pydantic 模型从 router 迁移到 models/ 目录
+- 前端提取共享工具（format.ts, theme.ts, constants.ts, shared.ts）
+- API 请求函数合并为统一 _fetch 基方法 + 401 防并发弹窗
+- diff.py N+1 性能修复（单条 git log --stat）
+- 新增 ruff.toml + eslint.config.mjs 工程配置
+- 架构文档全面更新
 
 ### 2026-02-19
 - 初版产品文档

@@ -54,3 +54,13 @@ export class SessionCard extends LitElement {
 
 - 提交信息使用**中文**
 - 保持提交粒度适中，每个提交做一件事
+
+## 工程配置
+
+| 工具 | 配置文件 | 说明 |
+|------|---------|------|
+| Ruff | `ruff.toml` | Python 代码检查（line-length=120, py312, select E/W/F/I/UP/N/B） |
+| ESLint | `frontend/eslint.config.mjs` | TypeScript 代码检查（flat config + typescript-eslint） |
+| TypeScript | `frontend/tsconfig.json` | 严格模式，ES2022，experimentalDecorators |
+| pytest | `backend/pytest.ini` | 后端测试配置 |
+| Vitest | `frontend/vite.config.ts` | 前端测试配置（test.environment: node） |

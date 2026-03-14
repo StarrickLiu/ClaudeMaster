@@ -29,18 +29,19 @@ make dev
 backend/
   routers/     ← FastAPI 路由（每个资源一个文件）
   services/    ← 业务逻辑（每个关注点一个文件）
-  models/      ← Pydantic 数据模型
-  ws/          ← WebSocket 端点
+  models/      ← Pydantic 数据模型（chat.py, agent.py, diff.py, ...）
+  ws/          ← WebSocket 端点（handler.py, agent_handler.py）
 
 frontend/src/
-  pages/       ← 页面级 Lit 组件
+  pages/       ← 页面级 Lit 组件（dashboard, viewer, agents, ...）
   components/  ← 可复用 UI 组件
-  services/    ← 客户端服务
-  styles/      ← CSS 设计变量和响应式布局
-  utils/       ← 工具函数
+  services/    ← WebSocket 客户端
+  styles/      ← CSS 设计变量 + 共享 Lit CSS（shared.ts）
+  utils/       ← 工具函数（format.ts, theme.ts, constants.ts, ...）
 
-agent/         ← cm-agent 远程 sidecar
+agent/         ← cm-agent 远程守护进程 + requirements.txt
 site-docs/     ← 产品文档站（MkDocs Material）
+ruff.toml      ← Python 代码检查配置（ruff）
 ```
 
 ## 开发工作流

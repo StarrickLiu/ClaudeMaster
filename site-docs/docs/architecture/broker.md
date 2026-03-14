@@ -21,6 +21,9 @@ ClaudeBroker 是一个**单例**，管理所有 Claude CLI 子进程：
 - 通过 stdin 写入 JSON 消息，从 stdout 读取 JSON 事件
 - 每个 `ClaudeSession` 维护订阅者列表，WebSocket handler 订阅事件并转发给浏览器
 
+!!! info "BaseSession 基类"
+    `ClaudeSession` 和 `RemoteSession` 均继承自 `BaseSession`（`services/base_session.py`），共享 `subscribe()`/`unsubscribe()`/`_notify()` 事件订阅接口和公共字段（`session_id`、`initial_id`、`name`、`state`、`launch_config`、`pending_control_request`）。
+
 ## stream-json 协议
 
 Claude CLI 的 stream-json 是一种基于行的 JSON 流协议。

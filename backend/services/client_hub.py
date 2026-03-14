@@ -8,53 +8,31 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket
 
+from services.base_session import BaseSession
 from services.name_generator import generate_name
+from services.session_name_store import ensure_name
 
 if TYPE_CHECKING:
     from services.agent_config import AgentConfigStore
 
 logger = logging.getLogger(__name__)
 
-EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
-
 # 断线后保留会话的时间（秒）
 DISCONNECT_TIMEOUT = 300  # 5 分钟
 
 
 @dataclass
-class RemoteSession:
+class RemoteSession(BaseSession):
     """远程 cm-agent 连接的会话，接口与 ClaudeSession 一致。"""
 
-    session_id: str  # Claude 真实 session_id（从 init 事件获取）
-    initial_id: str  # 稳定标识，用于 URL/WS/查找
-    agent_id: str  # 所属 agent
-    client_id: str  # 向后兼容（= agent_id）
-    project_path: str
-    hostname: str
-    name: str = ""
-    state: str = "starting"  # starting | idle | streaming | waiting_permission | closed | disconnected
-    launch_config: dict[str, Any] = field(default_factory=dict)
-    pending_control_request: dict[str, Any] | None = field(default=None, repr=False)
-    _subscribers: dict[str, EventCallback] = field(default_factory=dict, repr=False)
-
-    def subscribe(self, callback: EventCallback) -> str:
-        sub_id = uuid.uuid4().hex[:8]
-        self._subscribers[sub_id] = callback
-        return sub_id
-
-    def unsubscribe(self, sub_id: str) -> None:
-        self._subscribers.pop(sub_id, None)
-
-    async def _notify(self, event: dict[str, Any]) -> None:
-        for cb in list(self._subscribers.values()):
-            try:
-                await cb(event)
-            except Exception:
-                logger.debug("通知订阅者失败", exc_info=True)
+    agent_id: str = ""  # 所属 agent
+    client_id: str = ""  # 向后兼容（= agent_id）
+    project_path: str = ""
+    hostname: str = ""
 
 
 @dataclass
@@ -92,6 +70,12 @@ class ClientHub:
 
     def get_agent(self, agent_id: str) -> AgentConnection | None:
         return self._agents.get(agent_id)
+
+    def resolve_pending_request(self, request_id: str, result: dict[str, Any]) -> None:
+        """解析并完成一个待处理的请求 Future。"""
+        fut = self._pending_requests.pop(request_id, None)
+        if fut and not fut.done():
+            fut.set_result(result)
 
     def _unique_sessions(self) -> list[RemoteSession]:
         """去重返回所有独立会话。"""
@@ -355,7 +339,7 @@ class ClientHub:
         })
 
         # 等待 agent 回报 session_started 或 session_start_failed
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = fut
 
         try:
@@ -410,10 +394,14 @@ class ClientHub:
         items = msg.get("items", [])
         agent.processes = items
 
-        # 存储远程会话摘要
+        # 存储远程会话摘要，自动分配名称
         sessions = msg.get("sessions", [])
         logger.info("agent %s 上报 %d 个进程, %d 个会话", agent.agent_id[:8], len(items), len(sessions))
         if sessions:
+            for s in sessions:
+                sid = s.get("session_id")
+                if sid and not s.get("name"):
+                    s["name"] = ensure_name(sid)
             agent.remote_sessions = {s["session_id"]: s for s in sessions if s.get("session_id")}
 
     async def handle_session_detail(self, agent: AgentConnection, msg: dict[str, Any]) -> None:
@@ -432,7 +420,7 @@ class ClientHub:
             return None
 
         request_id = uuid.uuid4().hex
-        future: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = future
 
         try:
@@ -465,16 +453,9 @@ class ClientHub:
         if isinstance(agent_or_session, RemoteSession):
             rs = agent_or_session
         elif isinstance(agent_or_session, AgentConnection):
-            agent = agent_or_session
-            if session_id:
-                rs = agent.sessions.get(session_id) or self._sessions.get(session_id)
-            elif agent.mode == "oneshot" and len(agent.sessions) == 1:
-                rs = next(iter(agent.sessions.values()))
-            else:
-                logger.warning("agent %s 上报事件缺少 session_id", agent.agent_id[:8])
-                return
+            rs = self._resolve_session(agent_or_session, {"session_id": session_id} if session_id else {})
             if not rs:
-                logger.warning("agent %s 会话 %s 不存在", agent.agent_id[:8], session_id)
+                logger.warning("agent %s 上报事件无法解析会话: session_id=%s", agent_or_session.agent_id[:8], session_id)
                 return
         else:
             return
@@ -528,14 +509,7 @@ class ClientHub:
         if isinstance(agent_or_session, RemoteSession):
             rs = agent_or_session
         elif isinstance(agent_or_session, AgentConnection):
-            agent = agent_or_session
-            if session_id:
-                rs = agent.sessions.get(session_id) or self._sessions.get(session_id)
-            elif agent.mode == "oneshot" and len(agent.sessions) == 1:
-                rs = next(iter(agent.sessions.values()))
-            else:
-                logger.warning("agent %s status 缺少 session_id", agent.agent_id[:8])
-                return
+            rs = self._resolve_session(agent_or_session, {"session_id": session_id} if session_id else {})
             if not rs:
                 return
         else:
@@ -571,7 +545,7 @@ class ClientHub:
             raise ValueError(f"agent {agent_id} 未连接")
 
         request_id = uuid.uuid4().hex
-        fut: asyncio.Future[dict[str, Any]] = asyncio.get_event_loop().create_future()
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending_requests[request_id] = fut
 
         await agent.ws.send_json({
@@ -652,9 +626,4 @@ class ClientHub:
         agent = self._agents.get(agent_id)
         if not agent:
             return []
-        # 标记 managed 状态
-        managed_pids = set()
-        for rs in agent.sessions.values():
-            # 这里无法获取 pid，但进程列表中的 managed 字段由 agent 端设置
-            pass
         return agent.processes

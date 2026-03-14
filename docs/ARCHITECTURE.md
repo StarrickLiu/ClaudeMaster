@@ -273,7 +273,7 @@ Claude Code 以 Node.js 进程运行。检测方法：
 ClaudeMaster/
 ├── backend/
 │   ├── main.py                    # FastAPI 应用入口、CORS、生命周期
-│   ├── config.py                  # 所有配置（路径、端口等）
+│   ├── config.py                  # 全局配置（路径、端口、版本号、认证）
 │   ├── conftest.py                # pytest 共享 fixtures
 │   ├── routers/
 │   │   ├── sessions.py            # 会话 CRUD + 搜索 + 名称更新
@@ -282,61 +282,93 @@ ClaudeMaster/
 │   │   ├── history.py             # 全局历史
 │   │   ├── projects.py            # 项目列表
 │   │   ├── diff.py                # Git diff 和提交历史
+│   │   ├── usage.py               # Token 用量统计 + 图表
+│   │   ├── agents.py              # 远程 agent 管理（列表/进程/会话/改名）
 │   │   └── *_test.py              # 对应路由的测试
 │   ├── services/
+│   │   ├── base_session.py        # 会话基类（BaseSession）+ EventCallback 类型
 │   │   ├── session_store.py       # 解析并缓存会话 JSONL 文件
-│   │   ├── claude_broker.py       # Claude CLI 子进程管理（Broker 模式）
+│   │   ├── claude_broker.py       # Claude CLI 子进程管理（ClaudeSession + ClaudeBroker）
+│   │   ├── client_hub.py          # 远程 agent 会话管理（RemoteSession + AgentConnection + ClientHub）
+│   │   ├── session_registry.py    # 统一会话索引（合并 broker + hub）
 │   │   ├── session_name_store.py  # 会话名称持久化（JSON 文件）
 │   │   ├── name_generator.py      # Docker 风格随机名称生成器
 │   │   ├── process_manager.py     # 检测运行中的 Claude 进程
+│   │   ├── usage_service.py       # Token 用量聚合与缓存
+│   │   ├── agent_config.py        # Agent 配置持久化（display_name 等）
 │   │   ├── history_reader.py      # 解析全局 history.jsonl
 │   │   ├── project_scanner.py     # 从 ~/.claude/projects/ 发现项目
 │   │   └── *_test.py              # 对应服务的测试
 │   ├── models/
-│   │   └── session.py             # SessionSummary, SessionDetail, SubagentInfo
+│   │   ├── message.py             # ContentBlock, TokenUsage, Message
+│   │   ├── session.py             # SessionSummary, SessionDetail, SubagentInfo
+│   │   ├── process.py             # ClaudeProcess
+│   │   ├── project.py             # Project
+│   │   ├── chat.py                # StartChatRequest, ChatSessionInfo, UpdateChatRequest
+│   │   ├── diff.py                # CommitInfo
+│   │   └── agent.py               # KillProcessesRequest, UpdateAgentRequest
 │   ├── ws/
-│   │   └── handler.py             # WebSocket 聊天桥梁
+│   │   ├── handler.py             # WebSocket 聊天桥梁
+│   │   └── agent_handler.py       # Agent WebSocket 端点（cm-agent 通信）
 │   └── requirements.txt
+│
+├── agent/
+│   ├── cm_agent.py                # cm-agent 守护进程（远程机器上运行）
+│   └── requirements.txt           # agent 依赖（websockets>=14.0）
 │
 ├── frontend/
 │   ├── index.html
 │   ├── package.json
 │   ├── vite.config.ts
 │   ├── tsconfig.json
+│   ├── eslint.config.mjs          # ESLint flat config（typescript-eslint）
 │   └── src/
-│       ├── main.ts                # 应用启动、路由初始化
+│       ├── main.ts                # 应用启动、路由初始化、主题初始化
 │       ├── router.ts              # Hash 路由（#/dashboard, #/viewer/...）
-│       ├── api.ts                 # 后端 API 客户端（fetch + requestPatch）
+│       ├── api.ts                 # 后端 API 客户端（统一 _fetch 基方法）
 │       ├── pages/
 │       │   ├── dashboard.ts       # 仪表盘：活跃/待命/最近会话
+│       │   ├── sessions.ts        # 会话浏览器：筛选 + 搜索 + 分页
 │       │   ├── viewer.ts          # 对话查看器 + 交互式聊天
+│       │   ├── agents.ts          # 远程机器管理页面
+│       │   ├── settings.ts        # 设置页面：主题 + 认证令牌
 │       │   └── docs.ts            # 文档页面
 │       ├── components/
 │       │   ├── chat-input.ts      # 聊天输入框 + 状态指示器
 │       │   ├── session-header.ts  # 会话头部：改名、接入/恢复/断开
 │       │   ├── session-card.ts    # 会话摘要卡片
+│       │   ├── session-summary.ts # 会话统计摘要
 │       │   ├── message-bubble.ts  # 对话消息气泡（Markdown 渲染）
-│       │   ├── tool-call.ts       # 工具调用折叠面板
+│       │   ├── tool-call.ts       # 工具调用折叠面板（含 Todo 专属渲染）
 │       │   ├── thinking-block.ts  # 思维块显示
 │       │   ├── diff-view.ts       # 统一差异视图
+│       │   ├── process-card.ts    # 进程信息卡片
+│       │   ├── usage-card.ts      # 用量仪表卡片（柱状图 + 配额）
+│       │   ├── nav-bar.ts         # 顶部导航栏
 │       │   ├── permission-dialog.ts  # 工具权限审批对话框
+│       │   ├── new-session-dialog.ts # 新建会话对话框
 │       │   ├── launch-config-dialog.ts # 启动配置对话框
-│       │   ├── session-summary.ts # 会话统计摘要
 │       │   └── *.test.ts          # 对应组件的测试
 │       ├── services/
-│       │   └── chat-client.ts     # WebSocket 聊天客户端
+│       │   └── chat-client.ts     # WebSocket 聊天客户端（状态机 + 心跳）
 │       ├── styles/
 │       │   ├── reset.css          # CSS 重置
 │       │   ├── tokens.css         # 设计变量（颜色、间距、字体）
-│       │   └── layout.css         # 响应式网格、容器
+│       │   ├── layout.css         # 响应式网格、容器
+│       │   └── shared.ts          # 共享 Lit CSS（对话框、按钮、动画）
 │       └── utils/
+│           ├── constants.ts       # 共享常量（MODEL_OPTIONS, PERMISSION_MODES, TOOL_PRESETS）
+│           ├── format.ts          # 格式化工具（formatTokens, formatUptime, toolDescription）
+│           ├── theme.ts           # 主题管理（getTheme, applyTheme）
 │           ├── markdown.ts        # Markdown → HTML 渲染
-│           └── time.ts            # 日期时间格式化
+│           ├── time.ts            # 日期时间格式化
+│           └── time.test.ts       # time.ts 测试
 │
 ├── docs/
 │   ├── ARCHITECTURE.md            # 本文件
 │   └── PRODUCT.md                 # 产品设计文档
 │
+├── ruff.toml                      # Python 代码检查配置（ruff）
 ├── Caddyfile                      # HTTPS 反向代理配置
 ├── start.sh                       # 一键启动脚本（构建 + 运行）
 ├── Makefile                       # 常用命令：make dev, make test, make https
@@ -389,6 +421,35 @@ PATCH /api/chat/:sessionId
 
 POST /api/chat/:sessionId/stop
      → { success: boolean }
+
+GET  /api/usage
+     → UsageResponse { today, window_5h, daily }
+
+GET  /api/usage/chart?days=7|14|30
+     → [DailyUsage]
+
+GET  /api/quota
+     → QuotaResponse { five_hour, seven_day, ... }
+
+GET  /api/agents
+     → [AgentInfo { agent_id, hostname, display_name, state, mode, ... }]
+
+GET  /api/agents/:agentId/processes
+     → [RemoteProcess]
+
+GET  /api/agents/:agentId/sessions
+     → [SessionSummary]
+
+GET  /api/agents/:agentId/sessions/:sessionId
+     → SessionDetail
+
+POST /api/agents/:agentId/kill-processes
+     body: { pids: [int] }
+     → { killed: [int], failed: [int] }
+
+PATCH /api/agents/:agentId
+     body: { display_name? }
+     → { agent_id, display_name }
 ```
 
 #### 会话 ID 说明
@@ -437,6 +498,41 @@ Broker 管理的会话有两个 ID：
 
 // 中断执行
 { "type": "interrupt" }
+```
+
+### 6.3 Agent WebSocket 协议
+
+```
+连接地址：ws://host:port/ws/agent/{client_id}?token=<auth_token>
+
+── Agent → 服务端 ──
+// 注册（首条消息）
+{ "type": "register", "hostname": "...", "mode": "daemon"|"oneshot", "allowed_paths": [...] }
+
+// 事件转发
+{ "type": "event", "session_id": "...", "event": { ... } }
+
+// 状态报告
+{ "type": "agent_status", "session_id": "...", "status": "claude_exited", "exit_code": 0 }
+
+// 进程上报
+{ "type": "processes", "items": [...], "sessions": [...] }
+
+// 会话启动结果
+{ "type": "session_started"|"session_start_failed", "request_id": "...", "session_id": "..." }
+
+── 服务端 → Agent ──
+// 注册确认
+{ "type": "registered", "agent_id": "...", "mode": "daemon" }
+
+// 启动会话
+{ "type": "start_session", "request_id": "...", "project_path": "...", "claude_args": [...] }
+
+// 停止会话
+{ "type": "stop_session", "session_id": "..." }
+
+// 心跳
+{ "type": "ping", "ts": 1234567890 }
 ```
 
 #### Broker 架构
@@ -541,9 +637,17 @@ class SessionFileHandler(FileSystemEventHandler):
 - [x] Token 用量统计 + 配额显示
 - [x] HTTPS 支持（Caddy 反向代理 + 自签名证书）
 - [x] 24 小时待命中会话分区
-- [ ] 深色/浅色主题切换
+- [x] 深色/浅色主题切换
 - [ ] 导出对话（Markdown、HTML）
 - [ ] 子代理对话树可视化
+
+### 第五阶段：多机管理 ✅
+
+- [x] cm-agent 守护进程（WebSocket 连接 + 心跳 + 断线重连）
+- [x] 远程会话启动/停止/交互
+- [x] 远程进程列表 + 批量终止
+- [x] Agent 管理页面（在线状态、延迟、改名）
+- [x] SessionRegistry 统一本地/远程会话路由
 
 ---
 

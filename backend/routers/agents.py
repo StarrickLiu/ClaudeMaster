@@ -6,6 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
+from models.agent import KillProcessesRequest, UpdateAgentRequest
 from services.agent_config import AgentConfigStore
 from services.client_hub import ClientHub
 from services.claude_broker import ClaudeBroker
@@ -20,28 +21,28 @@ _config_store: AgentConfigStore | None = None
 _broker: ClaudeBroker | None = None
 
 
+from config import APP_VERSION as _APP_VERSION
+
+
 def init_agents_router(
     client_hub: ClientHub,
     agent_config: AgentConfigStore,
     broker: ClaudeBroker | None = None,
 ) -> None:
     """由 main.py 调用，注入依赖实例。"""
-    global _client_hub, _config_store, _broker
+    global _client_hub, _config_store, _broker, _server_started_at
     _client_hub = client_hub
     _config_store = agent_config
     _broker = broker
+    from datetime import datetime, timezone
+    _server_started_at = datetime.now(timezone.utc).isoformat()
 
 
-_APP_VERSION = "0.3.0"
 _server_started_at: str = ""
 
 
 def _build_local_agent() -> dict[str, Any]:
     """构建本地 agent 的信息字典。"""
-    global _server_started_at
-    if not _server_started_at:
-        from datetime import datetime, timezone
-        _server_started_at = datetime.now(timezone.utc).isoformat()
 
     processes = scan_claude_processes()
 
@@ -80,7 +81,7 @@ def _build_local_agent() -> dict[str, Any]:
 )
 async def list_agents() -> list[dict[str, Any]]:
     if _client_hub is None:
-        raise RuntimeError("ClientHub 未初始化")
+        raise HTTPException(status_code=503, detail="ClientHub 未初始化")
     local_agent = _build_local_agent()
     remote_agents = _client_hub.list_agents()
     return [local_agent, *remote_agents]
@@ -107,7 +108,7 @@ async def get_agent_processes(agent_id: str) -> list[dict[str, Any]]:
         return [p.model_dump() if hasattr(p, "model_dump") else p.dict() for p in processes]
 
     if _client_hub is None:
-        raise RuntimeError("ClientHub 未初始化")
+        raise HTTPException(status_code=503, detail="ClientHub 未初始化")
     agent = _client_hub.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"agent {agent_id} 不存在")
@@ -121,7 +122,7 @@ async def get_agent_processes(agent_id: str) -> list[dict[str, Any]]:
 )
 async def get_agent_sessions(agent_id: str) -> list[dict[str, Any]]:
     if _client_hub is None:
-        raise RuntimeError("ClientHub 未初始化")
+        raise HTTPException(status_code=503, detail="ClientHub 未初始化")
     agent = _client_hub.get_agent(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail=f"agent {agent_id} 不存在")
@@ -135,7 +136,7 @@ async def get_agent_sessions(agent_id: str) -> list[dict[str, Any]]:
 )
 async def get_agent_session_detail(agent_id: str, session_id: str, project: str = "") -> dict[str, Any]:
     if _client_hub is None:
-        raise RuntimeError("ClientHub 未初始化")
+        raise HTTPException(status_code=503, detail="ClientHub 未初始化")
 
     # 从 agent 的 remote_sessions 中找 project_path
     agent = _client_hub.get_agent(agent_id)
@@ -170,12 +171,10 @@ async def get_agent_session_detail(agent_id: str, session_id: str, project: str 
     summary="终止 agent 上的指定进程",
     description="向 agent 发送 kill 命令，终止指定 pid 列表中的 Claude 进程。不能终止 agent 自身和已托管的进程。",
 )
-async def kill_agent_processes(agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
+async def kill_agent_processes(agent_id: str, body: KillProcessesRequest) -> dict[str, Any]:
     if _client_hub is None:
-        raise RuntimeError("ClientHub 未初始化")
-    pids = body.get("pids", [])
-    if not pids or not isinstance(pids, list):
-        raise HTTPException(status_code=400, detail="缺少 pids 参数")
+        raise HTTPException(status_code=503, detail="ClientHub 未初始化")
+    pids = body.pids
     try:
         result = await _client_hub.kill_agent_processes(agent_id, pids)
         return {
@@ -191,8 +190,8 @@ async def kill_agent_processes(agent_id: str, body: dict[str, Any]) -> dict[str,
     summary="更新 agent 配置",
     description="修改 agent 的显示名称等配置。",
 )
-async def update_agent(agent_id: str, body: dict[str, Any]) -> dict[str, Any]:
-    display_name = body.get("display_name")
+async def update_agent(agent_id: str, body: UpdateAgentRequest) -> dict[str, Any]:
+    display_name = body.display_name
     if display_name is not None:
         if _config_store:
             _config_store.set_display_name(agent_id, display_name)

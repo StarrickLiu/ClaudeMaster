@@ -12,6 +12,7 @@ import {
   type ToolActivity,
 } from "../services/chat-client.js";
 import type { LaunchConfig } from "../components/launch-config-dialog.js";
+import { toolDescription } from "../utils/format.js";
 import "../components/message-bubble.js";
 import "../components/tool-call.js";
 import "../components/thinking-block.js";
@@ -845,7 +846,7 @@ export class ViewerPage extends LitElement {
       // 检测 "Prompt is too long" 错误
       const isError = !!(evt as Record<string, unknown>)["is_error"];
       const resultText = String((evt as Record<string, unknown>)["result"] ?? "");
-      if (isError && resultText.includes("Prompt is too long") || this.streamingText.includes("Prompt is too long")) {
+      if ((isError && resultText.includes("Prompt is too long")) || this.streamingText.includes("Prompt is too long")) {
         this._promptTooLong = true;
       }
 
@@ -1061,27 +1062,6 @@ export class ViewerPage extends LitElement {
     return icons[name] ?? "🔧";
   }
 
-  /** 从工具 input 提取简短描述 */
-  private _toolDesc(name: string, input: Record<string, unknown>): string {
-    const s = (v: unknown) => String(v ?? "").slice(0, 80);
-    switch (name) {
-      case "Bash":        return s(input["command"]);
-      case "Read":        return s(input["file_path"]);
-      case "Write":       return s(input["file_path"]);
-      case "Edit":        return s(input["file_path"]);
-      case "MultiEdit":   return s(input["file_path"]);
-      case "NotebookEdit":return s(input["notebook_path"]);
-      case "NotebookRead":return s(input["notebook_path"]);
-      case "Glob":        return s(input["pattern"]);
-      case "Grep":        return `"${s(input["pattern"])}"${input["path"] ? ` in ${s(input["path"])}` : ""}`;
-      case "WebFetch":    return s(input["url"]);
-      case "WebSearch":   return s(input["query"]);
-      case "Task":        return s(input["description"]);
-      case "LS":          return s(input["path"]);
-      default:            return "";
-    }
-  }
-
   private _renderConversation(s: SessionDetail["summary"]) {
     const allMessages = this.data!.messages;
     const total = allMessages.length;
@@ -1155,7 +1135,7 @@ export class ViewerPage extends LitElement {
               <div class="activity-items">
                 ${this.toolActivities.map((a) => {
                   const icon = this._toolIcon(a.toolName);
-                  const desc = this._toolDesc(a.toolName, a.input);
+                  const desc = toolDescription(a.toolName, a.input);
                   const ts = new Date(a.timestamp).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
                   return html`
                     <div class="activity-item ${a.complete ? "" : "pending"}">

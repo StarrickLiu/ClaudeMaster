@@ -1,5 +1,6 @@
 // 应用启动：注册路由、挂载导航
 import { router } from "./router.js";
+import { getTheme, applyTheme } from "./utils/theme.js";
 import "./components/nav-bar.js";
 import "./pages/dashboard.js";
 import "./pages/sessions.js";
@@ -9,10 +10,7 @@ import "./pages/docs.js";
 import "./pages/agents.js";
 
 // 初始化主题（尽早执行，避免浅色闪烁）
-const savedTheme = localStorage.getItem("cm_theme");
-if (savedTheme === "dark") {
-  document.documentElement.setAttribute("data-theme", "dark");
-}
+applyTheme(getTheme());
 
 const app = document.getElementById("app")!;
 

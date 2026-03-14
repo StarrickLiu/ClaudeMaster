@@ -109,6 +109,7 @@ export class ChatClient {
     };
 
     this.ws.onerror = () => {
+      this.ws?.close();
       this._setState("error");
       this.emit("error", "WebSocket 连接失败");
     };

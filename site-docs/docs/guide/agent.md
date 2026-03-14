@@ -32,6 +32,8 @@ cm-agent 同时支持**终端交互**和**网页交互**——你可以在终端
 cm-agent 只需要 Python 和 `websockets` 库：
 
 ```bash
+pip install -r agent/requirements.txt
+# 或直接安装
 pip install websockets
 ```
 
@@ -51,6 +53,20 @@ python agent/cm_agent.py \
 | `--server` | `-s` | （必填） | ClaudeMaster 服务端地址 |
 | `--token` | `-t` | `$CM_AUTH_TOKEN` | 认证令牌 |
 | `--project` | `-p` | 当前目录 | 项目工作目录 |
+
+### daemon 模式（推荐）
+
+cm-agent 支持 daemon 模式，常驻后台按需管理多个 Claude Code 会话：
+
+```bash
+python agent/cm_agent.py \
+  --server ws://your-server:8420 \
+  --token your-auth-token \
+  --mode daemon \
+  --allowed-paths /home/user/projects
+```
+
+daemon 模式下，cm-agent 不会自动启动 Claude CLI，而是等待 ClaudeMaster 的 `start_session` 命令。你可以从工作台新建远程会话，选择目标 agent 和项目路径。
 
 ### 透传 Claude 参数
 

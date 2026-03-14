@@ -75,31 +75,51 @@ graph TB
 ClaudeMaster/
 ├── backend/
 │   ├── main.py                    # FastAPI 应用入口
-│   ├── config.py                  # 全局配置
+│   ├── config.py                  # 全局配置（路径、端口、版本号、认证）
 │   ├── routers/                   # API 路由
 │   │   ├── sessions.py            # 会话 CRUD + 搜索
 │   │   ├── chat.py                # 交互式会话 API
 │   │   ├── processes.py           # 进程检测
+│   │   ├── diff.py                # Git diff + 提交历史
+│   │   ├── usage.py               # Token 用量统计 + 图表
+│   │   ├── agents.py              # 远程 agent 管理
 │   │   └── ...
 │   ├── services/
+│   │   ├── base_session.py        # 会话基类（BaseSession）
 │   │   ├── session_store.py       # JSONL 解析与缓存
-│   │   ├── claude_broker.py       # Claude CLI 子进程管理
+│   │   ├── claude_broker.py       # 本地 Claude CLI 子进程管理
 │   │   ├── client_hub.py          # 远程 agent 连接管理
 │   │   ├── session_registry.py    # 统一会话索引
+│   │   ├── usage_service.py       # Token 用量聚合与缓存
+│   │   ├── name_generator.py      # Docker 风格随机名称
+│   │   ├── agent_config.py        # Agent 配置持久化
 │   │   └── ...
 │   ├── models/                    # Pydantic 数据模型
+│   │   ├── session.py             # SessionSummary, SessionDetail
+│   │   ├── message.py             # ContentBlock, Message
+│   │   ├── chat.py                # StartChatRequest, ChatSessionInfo
+│   │   ├── agent.py               # KillProcessesRequest, UpdateAgentRequest
+│   │   ├── diff.py                # CommitInfo
+│   │   └── ...
 │   └── ws/
 │       ├── handler.py             # 浏览器 WebSocket
 │       └── agent_handler.py       # Agent WebSocket
 │
 ├── frontend/src/
-│   ├── pages/                     # 页面组件
+│   ├── pages/                     # 页面组件（dashboard, viewer, agents, ...）
 │   ├── components/                # 可复用 UI 组件
-│   ├── services/                  # 客户端服务
-│   └── utils/                     # 工具函数
+│   ├── services/                  # WebSocket 客户端
+│   ├── styles/                    # CSS 设计变量 + 共享 Lit CSS
+│   └── utils/                     # 工具函数（format, theme, constants, ...）
 │
-└── agent/
-    └── cm_agent.py                # 远程 sidecar 客户端
+├── agent/
+│   ├── cm_agent.py                # 远程 sidecar 客户端
+│   └── requirements.txt           # agent 依赖
+│
+├── site-docs/                     # MkDocs Material 文档站
+│
+├── ruff.toml                      # Python 代码检查配置
+└── Makefile                       # 常用命令
 ```
 
 ## 设计原则

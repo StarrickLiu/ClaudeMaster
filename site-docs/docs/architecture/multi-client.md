@@ -36,22 +36,25 @@ graph TB
 
 ### cm-agent (`agent/cm_agent.py`)
 
-客户端 sidecar 程序，在远程机器上运行：
+客户端守护进程，在远程机器上运行，支持两种模式：
 
-- 启动 Claude CLI 子进程（与 Broker 使用相同的 stream-json 参数）
+- **daemon 模式**（推荐）：常驻后台，按需启动/停止 Claude Code 会话，支持管理多个并行会话
+- **oneshot 模式**（向后兼容）：启动一个 Claude CLI 子进程并接入
 - 通过 WebSocket 连接到 ClaudeMaster 服务端
 - 双向转发 Claude 事件和用户消息
-- 支持终端和网页同时交互
+- 定期上报远程进程列表和会话摘要
 - 断线自动重连（指数退避，最大 30 秒）
 
 ### ClientHub (`backend/services/client_hub.py`)
 
 服务端的远程连接管理器：
 
-- 维护所有 `RemoteSession` 实例
-- `RemoteSession` 接口与 `ClaudeSession` 一致（subscribe/unsubscribe/状态管理）
-- 处理 agent 注册、断线重连、超时清理
-- 断线后保留会话 5 分钟，期间重连可恢复
+- 维护所有 `AgentConnection`（每个 cm-agent 守护进程一个）和 `RemoteSession` 实例
+- `RemoteSession` 继承自 `BaseSession`，与 `ClaudeSession` 共享统一接口
+- 处理 agent 注册、断线重连、超时清理（300 秒断线保持）
+- 支持向 daemon agent 发送 `start_session` / `stop_session` 命令
+- 管理 pending requests（Future），实现请求-响应模式
+- 提供 `resolve_pending_request()` 方法封装私有状态访问
 
 ### SessionRegistry (`backend/services/session_registry.py`)
 
@@ -67,31 +70,44 @@ graph TB
 ### Agent → 服务端
 
 ```json
-// 注册
-{"type": "register", "client_id": "hex-uuid", "hostname": "my-laptop",
- "project_path": "/home/user/project", "agent_version": "0.1.0"}
+// 注册（daemon 模式）
+{"type": "register", "hostname": "my-laptop", "mode": "daemon",
+ "allowed_paths": ["/home/user/projects"], "agent_version": "0.2.0"}
 
 // Claude stdout 事件转发
-{"type": "event", "event": {"type": "system", "subtype": "init", ...}}
+{"type": "event", "session_id": "...", "event": {"type": "system", "subtype": "init", ...}}
 
 // Claude 进程退出
-{"type": "agent_status", "status": "claude_exited", "exit_code": 0}
+{"type": "agent_status", "session_id": "...", "status": "claude_exited", "exit_code": 0}
+
+// 进程和会话列表上报
+{"type": "processes", "items": [...], "sessions": [...]}
+
+// 会话启动结果
+{"type": "session_started", "request_id": "...", "session_id": "..."}
 ```
 
 ### 服务端 → Agent
 
 ```json
 // 注册确认
-{"type": "registered", "session_id": "stable-id", "name": "swift-fox"}
+{"type": "registered", "agent_id": "...", "mode": "daemon"}
+
+// 启动远程会话
+{"type": "start_session", "request_id": "...", "project_path": "/home/user/project",
+ "claude_args": ["--model", "opus"], "name": "swift-fox"}
+
+// 停止远程会话
+{"type": "stop_session", "session_id": "..."}
 
 // 网页用户消息
-{"type": "user_message", "text": "请修复这个 bug", "source": "web"}
+{"type": "user_message", "text": "请修复这个 bug", "source": "web", "session_id": "..."}
 
 // 权限回复
-{"type": "control_response", "request_id": "req-1", "behavior": "allow"}
+{"type": "control_response", "request_id": "req-1", "behavior": "allow", "session_id": "..."}
 
-// 中断指令
-{"type": "interrupt"}
+// 心跳
+{"type": "ping", "ts": 1234567890}
 ```
 
 ## RemoteSession 状态

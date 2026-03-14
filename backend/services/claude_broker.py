@@ -8,47 +8,23 @@ import os
 import pathlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from config import CLAUDE_BIN
+from services.base_session import BaseSession
 from services.name_generator import generate_name
 
 logger = logging.getLogger(__name__)
 
-EventCallback = Callable[[dict[str, Any]], Awaitable[None]]
-
 
 @dataclass
-class ClaudeSession:
+class ClaudeSession(BaseSession):
     """一个运行中的 Claude Code 子进程。"""
 
-    session_id: str
-    project_path: str
-    process: asyncio.subprocess.Process
-    # 初始 UUID（start_session 返回给前端的 ID，始终不变）
-    initial_id: str = ""
-    name: str = ""
-    launch_config: dict[str, Any] = field(default_factory=dict)
+    project_path: str = ""
+    process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _stdout_task: asyncio.Task[None] | None = field(default=None, repr=False)
     _stderr_task: asyncio.Task[None] | None = field(default=None, repr=False)
-    _subscribers: dict[str, EventCallback] = field(default_factory=dict, repr=False)
-    state: str = "starting"  # starting | idle | streaming | waiting_permission | closed
-    pending_control_request: dict[str, Any] | None = field(default=None, repr=False)
-
-    def subscribe(self, callback: EventCallback) -> str:
-        sub_id = uuid.uuid4().hex[:8]
-        self._subscribers[sub_id] = callback
-        return sub_id
-
-    def unsubscribe(self, sub_id: str) -> None:
-        self._subscribers.pop(sub_id, None)
-
-    async def _notify(self, event: dict[str, Any]) -> None:
-        for cb in list(self._subscribers.values()):
-            try:
-                await cb(event)
-            except Exception:
-                logger.debug("通知订阅者失败", exc_info=True)
 
 
 class ClaudeBroker:

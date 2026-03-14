@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from config import AUTH_TOKEN
+from config import AUTH_TOKEN, APP_VERSION
 from routers import projects, sessions, processes, history, diff, chat, usage, agents
 from ws.handler import router as ws_router, init_chat_handler
 from ws.agent_handler import router as agent_ws_router, init_agent_handler
@@ -66,7 +66,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
 app = FastAPI(
     title="ClaudeMaster",
-    version="0.3.0",
+    version=APP_VERSION,
     description="Claude Code Web 管理平台",
     lifespan=lifespan,
 )
@@ -80,12 +80,14 @@ app.add_middleware(
 
 
 if AUTH_TOKEN:
+    from starlette.responses import JSONResponse
+
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):  # type: ignore[override]
             if request.url.path.startswith("/api/"):
                 token = request.headers.get("Authorization", "").removeprefix("Bearer ").strip()
                 if token != AUTH_TOKEN:
-                    raise HTTPException(status_code=401, detail="未授权")
+                    return JSONResponse(status_code=401, content={"detail": "未授权"})
             return await call_next(request)
 
     app.add_middleware(AuthMiddleware)

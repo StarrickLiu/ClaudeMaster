@@ -61,6 +61,56 @@ POST /api/chat/:sessionId/stop
 → { success: boolean }
 ```
 
+### 用量统计
+
+```
+GET /api/usage
+→ UsageResponse { today, window_5h, daily }
+
+GET /api/usage/chart?days=7|14|30
+→ [DailyUsage { date, total_tokens, cost_usd, message_count }]
+
+GET /api/quota
+→ QuotaResponse { five_hour, seven_day, subscription_type }
+```
+
+### Git 差异
+
+```
+GET /api/diff?project_path=<path>
+→ { diff, stat }
+
+GET /api/commits?project_path=<path>&limit=20
+→ [CommitInfo { hash, subject, author, date, stat, insertions, deletions }]
+
+GET /api/commit?project_path=<path>&hash=<hash>
+→ { diff }
+```
+
+### Agent 管理
+
+```
+GET /api/agents
+→ [AgentInfo { agent_id, hostname, display_name, state, mode, latency_ms, ... }]
+
+GET /api/agents/:agentId/processes
+→ [RemoteProcess { pid, cwd, uptime_seconds, managed }]
+
+GET /api/agents/:agentId/sessions
+→ [SessionSummary]
+
+GET /api/agents/:agentId/sessions/:sessionId
+→ SessionDetail
+
+POST /api/agents/:agentId/kill-processes
+body: { pids: [int] }
+→ { killed: [int], failed: [int] }
+
+PATCH /api/agents/:agentId
+body: { display_name? }
+→ { agent_id, display_name }
+```
+
 `ChatSessionInfo` 包含：
 
 | 字段 | 说明 |
@@ -120,31 +170,49 @@ POST /api/chat/:sessionId/stop
 #### Agent → 服务端
 
 ```json
-// 注册（连接后第一条消息）
-{"type": "register", "client_id": "...", "hostname": "...",
- "project_path": "...", "agent_version": "0.1.0"}
+// 注册（连接后第一条消息，支持 daemon/oneshot 模式）
+{"type": "register", "hostname": "...", "mode": "daemon",
+ "allowed_paths": ["/home/user/projects"], "agent_version": "0.2.0"}
 
 // Claude 事件转发
-{"type": "event", "event": {}}
+{"type": "event", "session_id": "...", "event": {}}
 
 // 状态报告
-{"type": "agent_status", "status": "claude_exited", "exit_code": 0}
+{"type": "agent_status", "session_id": "...", "status": "claude_exited", "exit_code": 0}
+
+// 进程列表上报
+{"type": "processes", "items": [...], "sessions": [...]}
+
+// 会话启动结果
+{"type": "session_started", "request_id": "...", "session_id": "..."}
+{"type": "session_start_failed", "request_id": "...", "error": "..."}
+
+// 心跳回复
+{"type": "pong", "ts": 1234567890}
 ```
 
 #### 服务端 → Agent
 
 ```json
 // 注册确认
-{"type": "registered", "session_id": "...", "name": "..."}
+{"type": "registered", "agent_id": "...", "mode": "daemon"}
+
+// 启动会话（daemon 模式）
+{"type": "start_session", "request_id": "...", "project_path": "...",
+ "claude_args": ["--model", "opus"], "name": "swift-fox"}
+
+// 停止会话
+{"type": "stop_session", "session_id": "..."}
 
 // 用户消息
-{"type": "user_message", "text": "...", "source": "web"}
+{"type": "user_message", "text": "...", "source": "web", "session_id": "..."}
 
 // 权限回复
-{"type": "control_response", "request_id": "...", "behavior": "allow"}
+{"type": "control_response", "request_id": "...", "behavior": "allow",
+ "session_id": "..."}
 
-// 中断
-{"type": "interrupt"}
+// 心跳
+{"type": "ping", "ts": 1234567890}
 ```
 
 ## 进程检测

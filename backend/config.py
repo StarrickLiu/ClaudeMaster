@@ -25,7 +25,8 @@ PROJECTS_DIR: Path = CLAUDE_HOME / "projects"
 HISTORY_FILE: Path = CLAUDE_HOME / "history.jsonl"
 STATS_FILE: Path = CLAUDE_HOME / "stats-cache.json"
 
-HOST: str = "0.0.0.0"
-PORT: int = int(os.getenv("PORT", "8420"))
 AUTH_TOKEN: str | None = os.getenv("AUTH_TOKEN")
+HOST: str = "0.0.0.0" if AUTH_TOKEN else "127.0.0.1"
+PORT: int = int(os.getenv("PORT", "8420"))
 CLAUDE_BIN: str = _find_claude_bin()
+APP_VERSION: str = "0.3.0"

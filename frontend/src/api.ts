@@ -1,84 +1,72 @@
 // 后端 API 请求封装
-const BASE = "";
 
-async function request<T>(path: string, params?: Record<string, string>): Promise<T> {
+const MAX_AUTH_RETRIES = 3;
+
+// 全局令牌输入锁：防止并发 401 时弹出多个 prompt
+let _authPromptLock: Promise<boolean> | null = null;
+
+async function _promptForToken(): Promise<boolean> {
+  if (_authPromptLock) return _authPromptLock;
+  _authPromptLock = new Promise<boolean>((resolve) => {
+    const newToken = prompt("请输入访问令牌：");
+    if (newToken) {
+      localStorage.setItem("cm_auth_token", newToken);
+      resolve(true);
+    } else {
+      resolve(false);
+    }
+    // 短暂保持锁，让同批次的并发请求共享结果
+    setTimeout(() => { _authPromptLock = null; }, 200);
+  });
+  return _authPromptLock;
+}
+
+async function _fetch<T>(path: string, init: RequestInit = {}, retries = 0): Promise<T> {
+  const url = new URL(path, window.location.origin);
+  const headers: Record<string, string> = { ...(init.headers as Record<string, string> || {}) };
+  const token = localStorage.getItem("cm_auth_token");
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const res = await fetch(url.toString(), { ...init, headers });
+
+  if (res.status === 401 && retries < MAX_AUTH_RETRIES) {
+    const got = await _promptForToken();
+    if (got) return _fetch(path, init, retries + 1);
+    throw new Error("未授权");
+  }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`API 请求失败: ${res.status}${body ? ` - ${body}` : ""}`);
+  }
+
+  return res.json();
+}
+
+function request<T>(path: string, params?: Record<string, string>): Promise<T> {
   const url = new URL(path, window.location.origin);
   if (params) {
     for (const [k, v] of Object.entries(params)) {
       if (v !== undefined && v !== null) url.searchParams.set(k, v);
     }
   }
-
-  const headers: Record<string, string> = {};
-  const token = localStorage.getItem("cm_auth_token");
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const res = await fetch(url.toString(), { headers });
-
-  if (res.status === 401) {
-    const newToken = prompt("请输入访问令牌：");
-    if (newToken) {
-      localStorage.setItem("cm_auth_token", newToken);
-      return request(path, params);
-    }
-    throw new Error("未授权");
-  }
-
-  if (!res.ok) {
-    throw new Error(`API 请求失败: ${res.status}`);
-  }
-
-  return res.json();
+  return _fetch<T>(url.pathname + url.search);
 }
 
-async function requestPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const url = new URL(path, window.location.origin);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = localStorage.getItem("cm_auth_token");
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const res = await fetch(url.toString(), {
+function requestPost<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return _fetch<T>(path, {
     method: "POST",
-    headers,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  if (res.status === 401) {
-    const newToken = prompt("请输入访问令牌：");
-    if (newToken) {
-      localStorage.setItem("cm_auth_token", newToken);
-      return requestPost(path, body);
-    }
-    throw new Error("未授权");
-  }
-
-  if (!res.ok) throw new Error(`API 请求失败: ${res.status}`);
-  return res.json();
 }
 
-async function requestPatch<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const url = new URL(path, window.location.origin);
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const token = localStorage.getItem("cm_auth_token");
-  if (token) headers["Authorization"] = `Bearer ${token}`;
-
-  const res = await fetch(url.toString(), {
+function requestPatch<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  return _fetch<T>(path, {
     method: "PATCH",
-    headers,
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-
-  if (res.status === 401) {
-    const newToken = prompt("请输入访问令牌：");
-    if (newToken) {
-      localStorage.setItem("cm_auth_token", newToken);
-      return requestPatch(path, body);
-    }
-    throw new Error("未授权");
-  }
-
-  if (!res.ok) throw new Error(`API 请求失败: ${res.status}`);
-  return res.json();
 }
 
 // 类型定义

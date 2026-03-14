@@ -4,6 +4,7 @@ import { customElement, state } from "lit/decorators.js";
 import { api } from "../api.js";
 import type { ClaudeProcess, SessionSummary, UsageResponse, QuotaResponse, ChatSessionInfo, AgentInfo, RemoteProcess } from "../api.js";
 import { timeAgo } from "../utils/time.js";
+import { formatUptime } from "../utils/format.js";
 import "../components/session-card.js";
 import "../components/process-card.js";
 import "../components/usage-card.js";
@@ -183,6 +184,7 @@ export class DashboardPage extends LitElement {
       align-items: center;
       gap: var(--space-sm);
       margin-bottom: var(--space-xs);
+      flex-wrap: wrap;
     }
 
     .pending-badge {
@@ -498,14 +500,6 @@ export class DashboardPage extends LitElement {
     }
   }
 
-  private _formatUptime(seconds: number): string {
-    if (seconds < 60) return `${seconds}s`;
-    const m = Math.floor(seconds / 60) % 60;
-    const h = Math.floor(seconds / 3600);
-    if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
-    return `${m}m`;
-  }
-
   private _toggleProject(projectPath: string) {
     const next = new Set(this._expandedProjects);
     if (next.has(projectPath)) next.delete(projectPath);
@@ -560,8 +554,9 @@ export class DashboardPage extends LitElement {
       // 按 cwd 分组
       const cwdMap = new Map<string, RemoteProcessGroup>();
       for (const p of procs) {
-        if (!p.managed) {
-          const key = p.cwd || p.project_name || `_orphan_${agent.agent_id}`;
+        // 跳过托管进程和无法识别路径的孤儿进程（cwd 不可读且无项目名）
+        if (!p.managed && (p.cwd || p.project_name)) {
+          const key = p.cwd || p.project_name || "";
           let group = cwdMap.get(key);
           if (!group) {
             group = {
@@ -748,7 +743,7 @@ export class DashboardPage extends LitElement {
           <div class="card-grid">
             ${streamingSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${matched} .brokerName=${cs.name || matched.name || ""} .machineName=${cs.source === "remote" ? (agentNameMap.get(cs.agent_id || "") || cs.hostname || "") : "本机"}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
               return html`
                 <div
@@ -783,40 +778,38 @@ export class DashboardPage extends LitElement {
           <div class="card-grid">
             ${idleSessions.map(cs => {
               const matched = this.sessions.find(s => s.session_id === cs.session_id || (cs.claude_session_id && s.session_id === cs.claude_session_id));
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${cs.name || matched.name || ""}></cm-session-card>`;
               const projectName = cs.project_path.split("/").pop() ?? cs.project_path;
-              return html`
-                <div
-                  class="pending-card"
-                  style="border-color: var(--color-standby)"
-                  role="button"
-                  tabindex="0"
-                  @click=${() => this._navToSession(cs.session_id, cs.project_path)}
-                >
-                  <div class="pending-card-header">
-                    <span class="pending-badge" style="background:var(--color-standby-bg);color:var(--color-standby)">待命中</span>
-                    ${showMachineBadge && cs.source === "remote" && cs.hostname ? html`<span class="remote-badge">${agentNameMap.get(cs.agent_id || "") || cs.hostname}</span>` : nothing}
-                    ${cs.state === "disconnected" ? html`<span class="disconnected-badge">${cs.source === "remote" ? "agent 断线，等待重连…" : "已断开"}</span>` : nothing}
-                    ${cs.name ? html`<span style="font-weight:600;font-size:var(--font-size-sm)">${cs.name}</span>` : nothing}
-                    <span class="pending-project">${projectName}</span>
-                    ${cs.source !== "remote" ? html`
-                      <button
-                        class="stop-btn"
-                        title="停止此会话"
-                        @click=${(e: Event) => {
-                          e.stopPropagation();
-                          this._stopSession(cs.session_id);
-                        }}
-                      >✕</button>
-                    ` : nothing}
-                  </div>
-                  <div class="pending-hint">${cs.project_path}</div>
-                </div>
-              `;
+              const data = matched
+                ? { ...matched, is_active: false }
+                : {
+                    session_id: cs.session_id,
+                    project_path: cs.project_path,
+                    project_name: projectName,
+                    first_message: "",
+                    last_assistant_text: "",
+                    user_turns: 0,
+                    tool_use_count: 0,
+                    message_count: 0,
+                    start_time: "",
+                    end_time: "",
+                    git_branch: "",
+                    is_active: false,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    name: cs.name || "",
+                  };
+              const machine = cs.source === "remote"
+                ? (agentNameMap.get(cs.agent_id || "") || cs.hostname || "")
+                : "本机";
+              return html`<cm-session-card
+                .data=${data}
+                .brokerName=${cs.name || matched?.name || ""}
+                .machineName=${machine}
+              ></cm-session-card>`;
             })}
             ${legacyStandby.map(p => {
               const matched = this.sessions.find(s => s.project_path === p.cwd);
-              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""}></cm-session-card>`;
+              if (matched) return html`<cm-session-card .data=${{ ...matched, is_active: false }} .brokerName=${matched.name || ""} .machineName=${"本机"}></cm-session-card>`;
               return html`<cm-process-card .data=${p}></cm-process-card>`;
             })}
             ${remoteStandbyGroups.map((group) => {
@@ -825,7 +818,8 @@ export class DashboardPage extends LitElement {
                 // 单个进程有匹配 JSONL 会话 → session-card
                 return html`<cm-session-card
                   .data=${{ ...group.session, is_active: true }}
-                  .brokerName=${machine}
+                  .brokerName=${group.session.name || ""}
+                  .machineName=${machine}
                   @click=${(e: Event) => { e.preventDefault(); this._navToSession(group.session!.session_id, group.session!.project_path, group.agent.agent_id); }}
                 ></cm-session-card>`;
               }
@@ -847,7 +841,7 @@ export class DashboardPage extends LitElement {
                       }}
                     >清理</button>
                   </div>
-                  <div class="pending-hint">${group.cwd || "路径不可读"} · 运行 ${this._formatUptime(Math.round(group.totalUptime))}</div>
+                  <div class="pending-hint">${group.cwd || "路径不可读"} · 运行 ${formatUptime(Math.round(group.totalUptime))}</div>
                 </div>
               `;
             })}

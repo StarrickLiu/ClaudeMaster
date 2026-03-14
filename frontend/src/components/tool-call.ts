@@ -2,6 +2,7 @@
 import { LitElement, html, css, nothing } from "lit";
 import { customElement, property } from "lit/decorators.js";
 import type { ContentBlock } from "../api.js";
+import { toolDescription } from "../utils/format.js";
 
 export interface ToolResult {
   content: unknown;
@@ -93,7 +94,7 @@ export class ToolCall extends LitElement {
       word-break: break-all;
       max-height: 300px;
       overflow-y: auto;
-      background: #f8f9fa;
+      background: var(--color-bg-secondary);
       padding: var(--space-sm);
       border-radius: 4px;
       margin: 0;
@@ -190,15 +191,7 @@ export class ToolCall extends LitElement {
   `;
 
   private _getDescription(): string {
-    const input = this.toolUse.input;
-    if (!input) return "";
-    if (input["command"]) return String(input["command"]).slice(0, 80);
-    if (input["file_path"]) return String(input["file_path"]);
-    if (input["pattern"]) return String(input["pattern"]);
-    if (input["query"]) return String(input["query"]).slice(0, 80);
-    if (input["url"]) return String(input["url"]).slice(0, 80);
-    if (input["description"]) return String(input["description"]).slice(0, 80);
-    return "";
+    return toolDescription(this.toolUse.name || "", this.toolUse.input || {});
   }
 
   private _formatContent(content: unknown): string {

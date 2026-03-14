@@ -63,23 +63,16 @@ class TestGetDiff:
 # ── GET /api/commits ─────────────────────────────────────────────────────────
 
 class TestGetCommits:
+    # git log --stat 输出格式：记录分隔符 + 格式化字段 + stat
     _log = (
-        "abc1234567890abcdef\x1fAdd feature\x1fAlice\x1f2024-01-15T10:00:00+08:00\n"
-        "def9876543210fedcba\x1fFix bug\x1fBob\x1f2024-01-14T09:30:00+08:00\n"
+        "\x1eabc1234567890abcdef\x1fAdd feature\x1fAlice\x1f2024-01-15T10:00:00+08:00\n"
+        " foo.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+        "\x1edef9876543210fedcba\x1fFix bug\x1fBob\x1f2024-01-14T09:30:00+08:00\n"
+        " bar.py | 4 ++--\n 1 file changed, 2 insertions(+), 2 deletions(-)\n"
     )
-    _stat = " 2 files changed, 10 insertions(+), 3 deletions(-)\n"
 
     def test_returns_commit_list(self, client):
-        call_count = 0
-
-        async def _fake(project_path, *args, **kwargs):
-            nonlocal call_count
-            call_count += 1
-            if "log" in args:
-                return self._log
-            return self._stat  # show --stat
-
-        with patch("routers.diff._run_git", side_effect=_fake):
+        with patch("routers.diff._run_git", side_effect=_mock_run_git(self._log)):
             resp = client.get("/api/commits", params={"project_path": "/fake"})
 
         assert resp.status_code == 200
@@ -90,12 +83,12 @@ class TestGetCommits:
         assert commits[0]["short_hash"] == "abc1234"
 
     def test_parses_insertions_deletions(self, client):
-        async def _fake(project_path, *args, **kwargs):
-            if "log" in args:
-                return "aaa1234567890\x1fTest\x1fX\x1f2024-01-01T00:00:00Z\n"
-            return " 5 files changed, 42 insertions(+), 7 deletions(-)\n"
-
-        with patch("routers.diff._run_git", side_effect=_fake):
+        log = (
+            "\x1eaaa1234567890\x1fTest\x1fX\x1f2024-01-01T00:00:00Z\n"
+            " a.py | 10 ++\n b.py | 5 +--\n"
+            " 5 files changed, 42 insertions(+), 7 deletions(-)\n"
+        )
+        with patch("routers.diff._run_git", side_effect=_mock_run_git(log)):
             resp = client.get("/api/commits", params={"project_path": "/fake"})
 
         c = resp.json()[0]

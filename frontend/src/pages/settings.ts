@@ -1,18 +1,7 @@
 // 设置页面：暗色模式、访问令牌配置
 import { LitElement, html, css } from "lit";
 import { customElement, state } from "lit/decorators.js";
-
-function getTheme(): "light" | "dark" {
-  return (localStorage.getItem("cm_theme") as "light" | "dark") || "light";
-}
-
-function applyTheme(theme: "light" | "dark") {
-  document.documentElement.setAttribute("data-theme", theme === "dark" ? "dark" : "");
-  localStorage.setItem("cm_theme", theme);
-}
-
-// 初始化主题（在模块加载时执行，避免闪烁）
-applyTheme(getTheme());
+import { getTheme, applyTheme } from "../utils/theme.js";
 
 @customElement("cm-settings")
 export class SettingsPage extends LitElement {

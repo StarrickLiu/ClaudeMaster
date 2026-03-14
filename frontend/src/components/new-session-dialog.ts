@@ -4,32 +4,13 @@ import { customElement, property, state } from "lit/decorators.js";
 import { api } from "../api.js";
 import type { Project, AgentInfo } from "../api.js";
 import type { LaunchConfig } from "./launch-config-dialog.js";
+import { MODEL_OPTIONS, PERMISSION_MODES, TOOL_PRESETS } from "../utils/constants.js";
 
 export interface NewSessionConfig extends LaunchConfig {
   projectPath: string;
   name: string;
   agentId?: string;
 }
-
-const MODEL_OPTIONS = [
-  { value: "", label: "默认" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "opus", label: "Opus" },
-  { value: "haiku", label: "Haiku" },
-];
-
-const PERMISSION_MODES = [
-  { value: "default", label: "默认（手动确认）" },
-  { value: "acceptEdits", label: "自动接受编辑" },
-  { value: "plan", label: "仅计划模式" },
-  { value: "bypassPermissions", label: "跳过所有权限" },
-];
-
-const TOOL_PRESETS: { label: string; tools: string[] }[] = [
-  { label: "完全", tools: [] },
-  { label: "只读", tools: ["Read", "Glob", "Grep", "WebFetch", "WebSearch"] },
-  { label: "无 Bash", tools: ["Read", "Glob", "Grep", "Edit", "Write", "WebFetch", "WebSearch"] },
-];
 
 @customElement("cm-new-session-dialog")
 export class NewSessionDialog extends LitElement {

@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.base_session import BaseSession
 from services.claude_broker import ClaudeBroker, ClaudeSession
 from services.client_hub import ClientHub, RemoteSession
 

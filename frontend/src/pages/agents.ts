@@ -4,6 +4,7 @@ import { customElement, state } from "lit/decorators.js";
 import { api } from "../api.js";
 import type { AgentInfo } from "../api.js";
 import { timeAgo } from "../utils/time.js";
+import { formatUptime } from "../utils/format.js";
 
 /** 统一进程类型：兼容本机 ClaudeProcess 和远程 RemoteProcess */
 interface AgentProcess {
@@ -238,16 +239,6 @@ export class AgentsPage extends LitElement {
     }
   }
 
-  private _formatUptime(seconds: number): string {
-    if (seconds < 60) return `${Math.round(seconds)}s`;
-    const m = Math.floor(seconds / 60) % 60;
-    const h = Math.floor(seconds / 3600) % 24;
-    const d = Math.floor(seconds / 86400);
-    if (d > 0) return h > 0 ? `${d}d ${h}h` : `${d}d`;
-    if (h > 0) return m > 0 ? `${h}h ${m}m` : `${h}h`;
-    return `${m}m`;
-  }
-
   private _getServerUrl(): string {
     return `wss://${window.location.host}`;
   }
@@ -377,7 +368,7 @@ export class AgentsPage extends LitElement {
               ${p.git_branch ? html`<span class="branch-tag" title=${p.git_branch}>${p.git_branch}</span>` : nothing}
               <span class="process-cwd" title=${p.cwd}>${p.cwd}</span>
               <span class="process-meta">PID ${p.pid}</span>
-              <span class="process-meta">${this._formatUptime(p.uptime_seconds)}</span>
+              <span class="process-meta">${formatUptime(p.uptime_seconds)}</span>
             </div>
           `) : html`<div class="empty-processes">暂无进程</div>`}
         </div>

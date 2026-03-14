@@ -84,22 +84,13 @@ _CACHE_TTL = 60  # 秒
 def _parse_timestamp(ts: str) -> datetime | None:
     """解析 ISO 8601 时间戳。"""
     try:
-        # 尝试多种格式
-        for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z"):
-            try:
-                dt = datetime.strptime(ts, fmt)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt
-            except ValueError:
-                continue
-        # dateutil-style fallback
-        if "+" in ts or ts.endswith("Z"):
-            ts_clean = ts.replace("Z", "+00:00")
-            return datetime.fromisoformat(ts_clean)
-        return None
-    except Exception:
-        logger.debug("时间戳解析失败: %s", ts, exc_info=True)
+        ts_clean = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ts_clean)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        logger.debug("时间戳解析失败: %s", ts)
         return None
 
 
