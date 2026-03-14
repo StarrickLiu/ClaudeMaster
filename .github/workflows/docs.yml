@@ -30,7 +30,7 @@ jobs:
         run: pip install -r site-docs/requirements.txt
 
       - name: 构建文档
-        run: mkdocs build -f site-docs/mkdocs.yml -d site-docs/site
+        run: cd site-docs && mkdocs build -d site
 
       - uses: actions/upload-pages-artifact@v3
         with:
